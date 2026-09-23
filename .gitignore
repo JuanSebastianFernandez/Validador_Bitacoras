@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local secrets and environment variables
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Generated and temporary artifacts
+outputs/
+tmp/
+analysis/
+node_modules/
+*.log
+
+# Operational source files (never commit production data)
+*-exported-logs.csv
+*-exported-request.csv
+EXPORT_*.xlsx
+Produccion *.xlsx
+produccion *.xlsx
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Codex-local metadata
+.agents/
+.codex/
