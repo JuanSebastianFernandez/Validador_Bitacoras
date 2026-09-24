@@ -771,6 +771,63 @@ def extract_workbook_rows(
     return workbook_bytes, rows
 
 
+def apply_qr_alias_corrections(
+    workbook_bytes: bytes,
+    rows: list[dict[str, Any]],
+    aliases: dict[str, str],
+) -> tuple[bytes, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Replace safely inferred truncated QR values and record the correction."""
+    if not aliases:
+        return workbook_bytes, rows, []
+    try:
+        wb = load_workbook(BytesIO(workbook_bytes), data_only=False)
+    except Exception as exc:
+        raise BitacoraError("No pude corregir los QR truncados en la bitácora.") from exc
+
+    sheet_qr_columns: dict[str, int] = {}
+    updated_rows: list[dict[str, Any]] = []
+    audit_entries: list[dict[str, Any]] = []
+    try:
+        for row in rows:
+            original = normalize_text(row.get("qr"))
+            corrected = aliases.get(original)
+            if not corrected:
+                updated_rows.append(row)
+                continue
+            sheet_name = row["sheet"]
+            if sheet_name not in sheet_qr_columns:
+                ws = wb[sheet_name]
+                header_row = _detect_header_row(ws, {"QR", "ESTADO DE LA OT"})
+                sheet_qr_columns[sheet_name] = _header_map(ws, header_row=header_row)["QR"]
+            wb[sheet_name].cell(
+                row["excel_row"], sheet_qr_columns[sheet_name]
+            ).value = corrected
+            corrected_row = dict(row)
+            corrected_row["qr"] = corrected
+            updated_rows.append(corrected_row)
+            audit_entries.append(
+                {
+                    "Etapa": "Prevalidación QR",
+                    "Hoja/Flujo": sheet_name,
+                    "QR/Referencia": f"{original} → {corrected}",
+                    "Decisión": "Corregir QR automáticamente",
+                    "Estado inicial": original,
+                    "Estado final": corrected,
+                    "AGP": normalize_identifier(row.get("agp")),
+                    "Protocolo": normalize_identifier(row.get("protocol")),
+                    "Detalle": (
+                        "El QR de la bitácora estaba truncado en un carácter final. "
+                        "Se encontró una única referencia compatible en PMS para la fecha de corte."
+                    ),
+                }
+            )
+        output = BytesIO()
+        wb.save(output)
+        return output.getvalue(), updated_rows, audit_entries
+    finally:
+        wb.close()
+
+
 def read_export_protocol_counts(
     export_source: str | Path | BinaryIO | bytes,
 ) -> dict[str, ProtocolElementCounts]:
@@ -1036,6 +1093,15 @@ def _drawing_event_from_record(record: Any) -> DrawingLogEvent:
     )
 
 
+def _truncated_qr_target(log_qr: Any, target_qrs: set[str]) -> str:
+    """Return the workbook QR when PMS has exactly one additional final character."""
+    actual = normalize_text(log_qr)
+    if len(actual) < 2 or actual in target_qrs or not actual[-1].isalnum():
+        return ""
+    candidate = actual[:-1]
+    return candidate if candidate in target_qrs else ""
+
+
 def _sorted_unique_timeline(events: Iterable[DrawingLogEvent]) -> list[DrawingLogEvent]:
     unique: dict[tuple[Any, ...], DrawingLogEvent] = {}
     for event in events:
@@ -1101,6 +1167,7 @@ def read_log_validation_data(
     allowed_states_by_qr: dict[str, set[str]] | None = None,
     include_rejection_comments: bool = False,
     include_timelines: bool = False,
+    include_qr_aliases: bool = False,
 ) -> Any:
     """Return validation states, log coverage, and target events omitted from the workbook."""
     target_qrs = {normalize_text(qr) for qr in qrs if normalize_text(qr)}
@@ -1110,6 +1177,7 @@ def read_log_validation_data(
     latest_unreported: dict[str, LogState] = {}
     latest_unreported_comment: dict[tuple[str, str], LogState] = {}
     timeline_events: dict[str, list[DrawingLogEvent]] = {}
+    exact_seen_qrs: set[str] = set()
     first_log_datetime: pd.Timestamp | None = None
     last_log_datetime: pd.Timestamp | None = None
     start = pd.Timestamp(production_date)
@@ -1125,6 +1193,9 @@ def read_log_validation_data(
             chunk["date_created"], errors="coerce", format="mixed"
         )
         chunk["normalized_qr"] = chunk["request_code"].map(normalize_text)
+        exact_seen_qrs.update(
+            chunk.loc[chunk["normalized_qr"].isin(target_qrs), "normalized_qr"]
+        )
         for column in LOG_OPTIONAL_COLUMNS:
             if column not in chunk.columns:
                 chunk[column] = ""
@@ -1195,14 +1266,25 @@ def read_log_validation_data(
 
         if not target_qrs:
             continue
-        chunk = chunk[chunk["normalized_qr"].isin(target_qrs)]
+        normalized_qr = chunk["normalized_qr"]
+        potential_alias = (
+            normalized_qr.str.len().gt(1)
+            & normalized_qr.str[-1].str.match(r"[A-Za-z0-9]", na=False)
+            & normalized_qr.str[:-1].isin(target_qrs)
+            & ~normalized_qr.isin(target_qrs)
+        )
+        chunk = chunk[normalized_qr.isin(target_qrs) | potential_alias]
         if chunk.empty:
             continue
         chunk["final_state"] = chunk["final_state"].map(canonicalize_state)
         chunk = chunk[chunk["final_state"].isin(ALL_DRAWING_STATES)]
         if allowed_states_by_qr:
             allowed_mask = [
-                state in allowed_states_by_qr.get(qr, ALL_DRAWING_STATES)
+                state
+                in allowed_states_by_qr.get(
+                    _truncated_qr_target(qr, target_qrs) or qr,
+                    ALL_DRAWING_STATES,
+                )
                 for qr, state in zip(chunk["normalized_qr"], chunk["final_state"])
             ]
             chunk = chunk[allowed_mask]
@@ -1249,6 +1331,26 @@ def read_log_validation_data(
         raise BitacoraError(
             "El CSV no contiene las columnas request_code, final_state y date_created."
         )
+    alias_candidates: dict[str, set[str]] = {}
+    for actual_qr, event in latest_on_day.items():
+        target_qr = _truncated_qr_target(actual_qr, target_qrs)
+        if not target_qr:
+            continue
+        allowed_states = (
+            allowed_states_by_qr.get(target_qr, ALL_DRAWING_STATES)
+            if allowed_states_by_qr
+            else ALL_DRAWING_STATES
+        )
+        if event.state in allowed_states:
+            alias_candidates.setdefault(target_qr, set()).add(actual_qr)
+    qr_aliases = {
+        target_qr: next(iter(candidates))
+        for target_qr, candidates in alias_candidates.items()
+        if len(candidates) == 1 and target_qr not in exact_seen_qrs
+    }
+    for corrected_qr in qr_aliases.values():
+        latest_unreported.pop(corrected_qr, None)
+
     for qr, event in list(latest_on_day.items()):
         if event.comment or event.state not in REJECTION_STATES:
             continue
@@ -1319,6 +1421,8 @@ def read_log_validation_data(
         additions.append(rejection_comments)
     if include_timelines:
         additions.append(timeline_events)
+    if include_qr_aliases:
+        additions.append(qr_aliases)
     return (*result, *additions)
 
 

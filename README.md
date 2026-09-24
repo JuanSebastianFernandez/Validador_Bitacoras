@@ -61,6 +61,11 @@ antes de avanzar:
    La comparación tolera apellidos omitidos por PMS cuando conserva al menos tres
    componentes inequívocos del nombre, además de orden, puntos, tildes y mayúsculas.
 6. Por defecto, el Excel final conserva solo las filas que coinciden.
+   Si un QR de la bitácora no existe en el log, pero PMS contiene una única
+   referencia idéntica con exactamente un carácter alfanumérico final adicional,
+   el sistema corrige el QR antes de validar y deja la modificación en la auditoría.
+   No corrige si el QR exacto aparece en cualquier parte del log o si encuentra
+   más de una variante posible.
 7. Las filas válidas se copian a la plantilla fija codificada `F-AGP-04`.
 8. El mismo Excel agrega al final la hoja `Resultado Validacion` con el detalle de
    coincidencias, diferencias, cantidades, devoluciones y trazabilidad temporal.

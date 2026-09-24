@@ -32,6 +32,7 @@ from bitacora import (
     UnreportedCase,
     UPDATE_ORIGINS,
     add_unreported_audit_rows,
+    apply_qr_alias_corrections,
     apply_protocol_audit_decisions,
     apply_protocol_audit_results,
     apply_state_audit_decisions,
@@ -328,6 +329,87 @@ def test_log_coverage_accepts_the_production_date():
         last_datetime=datetime(2026, 8, 13, 10, 0),
     )
     require_log_date_coverage(coverage, date(2026, 8, 11))
+
+
+def test_unique_missing_final_qr_character_is_reconciled_without_becoming_unreported():
+    csv = StringIO(
+        "request_code;initial_state;final_state;date_created;comments;username;user_created_last_name\n"
+        "QR-VD;2-Valorizado;2.5-Enviado a dibujo;2026-09-23 14:50:30;;system;System.PM\n"
+        "QR-VD;2.5-Enviado a dibujo;2.6-Dibujante asignado;2026-09-23 15:06:00;;CO1014301686;Quiroga Lozada.Juan Pablo\n"
+        "QR-VD;2.6-Dibujante asignado;2.7-Dibujo finalizado;2026-09-23 16:41:56;;1023014624;Porras Cano.Jenny Lorena\n"
+    )
+    on_day, as_of, _, unreported, timelines, aliases = read_log_validation_data(
+        csv,
+        {"QR-V"},
+        date(2026, 9, 23),
+        chunksize=1,
+        allowed_states_by_qr={"QR-V": {"2.5-Enviado a dibujo", "2.6-Dibujante asignado", "2.7-Dibujo finalizado"}},
+        include_timelines=True,
+        include_qr_aliases=True,
+    )
+
+    assert aliases == {"QR-V": "QR-VD"}
+    assert on_day["QR-VD"].state == "2.7-Dibujo finalizado"
+    assert as_of["QR-VD"].occurred_at == datetime(2026, 9, 23, 16, 41, 56)
+    assert [event.state for event in timelines["QR-VD"]] == [
+        "2.5-Enviado a dibujo",
+        "2.6-Dibujante asignado",
+        "2.7-Dibujo finalizado",
+    ]
+    assert not unreported
+
+
+def test_ambiguous_missing_final_qr_character_is_not_corrected_automatically():
+    csv = StringIO(
+        "request_code;initial_state;final_state;date_created;username;user_created_last_name\n"
+        "QR-VA;2.6-Dibujante asignado;2.7-Dibujo finalizado;2026-09-23 16:00:00;1023014624;Porras Cano.Jenny Lorena\n"
+        "QR-VB;2.6-Dibujante asignado;2.7-Dibujo finalizado;2026-09-23 17:00:00;1023014624;Porras Cano.Jenny Lorena\n"
+    )
+    *_, aliases = read_log_validation_data(
+        csv,
+        {"QR-V"},
+        date(2026, 9, 23),
+        chunksize=1,
+        allowed_states_by_qr={"QR-V": {"2.7-Dibujo finalizado"}},
+        include_qr_aliases=True,
+    )
+
+    assert aliases == {}
+
+
+def test_existing_exact_qr_is_not_replaced_by_a_longer_reference():
+    csv = StringIO(
+        "request_code;initial_state;final_state;date_created;username;user_created_last_name\n"
+        "QR-V;0-Por Valorizar;1-Enviado a territorio;2026-09-01 08:00:00;otro;Persona Externa\n"
+        "QR-VD;2.6-Dibujante asignado;2.7-Dibujo finalizado;2026-09-23 16:00:00;1023014624;Porras Cano.Jenny Lorena\n"
+    )
+    *_, aliases = read_log_validation_data(
+        csv,
+        {"QR-V"},
+        date(2026, 9, 23),
+        chunksize=1,
+        allowed_states_by_qr={"QR-V": {"2.7-Dibujo finalizado"}},
+        include_qr_aliases=True,
+    )
+
+    assert aliases == {}
+
+
+def test_qr_alias_correction_updates_workbook_rows_and_audit_trail():
+    workbook_bytes, rows = extract_workbook_rows(make_workbook())
+    corrected_bytes, corrected_rows, audit_entries = apply_qr_alias_corrections(
+        workbook_bytes,
+        rows,
+        {"QR-V": "QR-VD"},
+    )
+
+    corrected_old = next(row for row in corrected_rows if row["sheet"] == "Flujo Viejo")
+    assert corrected_old["qr"] == "QR-VD"
+    wb = load_workbook(BytesIO(corrected_bytes), data_only=False)
+    assert wb["Flujo Viejo"]["C2"].value == "QR-VD"
+    wb.close()
+    assert audit_entries[0]["Etapa"] == "Prevalidación QR"
+    assert audit_entries[0]["QR/Referencia"] == "QR-V → QR-VD"
 
 
 def test_unreported_cases_only_include_target_states_from_the_cutoff_day():

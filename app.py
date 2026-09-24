@@ -22,6 +22,7 @@ from bitacora import (
     UPLOAD_APPROVED_RESULTS,
     BitacoraError,
     add_unreported_audit_rows,
+    apply_qr_alias_corrections,
     apply_drawing_timings,
     apply_protocol_audit_decisions,
     apply_protocol_audit_results,
@@ -222,6 +223,16 @@ def protocol_inventory_frame(refs: list[dict[str, Any]]) -> pd.DataFrame:
 
 def audit_state_stage(context: dict[str, Any]) -> None:
     validations = context["validations"]
+    qr_aliases = context.get("qr_aliases", {})
+    if qr_aliases:
+        corrections = ", ".join(
+            f"{original} → {corrected}"
+            for original, corrected in sorted(qr_aliases.items())
+        )
+        st.info(
+            "Se corrigieron QR truncados porque PMS tenía una única coincidencia con "
+            f"un carácter final adicional: {corrections}. La corrección quedará en la auditoría."
+        )
     issues = [item for item in validations if item.result != STATUS_MATCH]
     decisions = context.setdefault("state_decisions", {})
     completed = sum(validation_audit_key(item) in decisions for item in issues)
@@ -1246,6 +1257,7 @@ if start:
             unreported_cases,
             rejection_comments,
             timelines,
+            qr_aliases,
         ) = read_log_validation_data(
             log_file.getvalue(),
             qrs,
@@ -1253,8 +1265,14 @@ if start:
             allowed_states_by_qr=allowed_states_by_qr,
             include_rejection_comments=True,
             include_timelines=True,
+            include_qr_aliases=True,
         )
         require_log_date_coverage(coverage, production_date)
+        workbook_bytes, rows, qr_audit_entries = apply_qr_alias_corrections(
+            workbook_bytes,
+            rows,
+            qr_aliases,
+        )
         validations = validate_rows(
             rows,
             latest_on_day,
@@ -1272,12 +1290,13 @@ if start:
             "latest_as_of": latest_as_of,
             "rejection_comments": rejection_comments,
             "timelines": timelines,
+            "qr_aliases": qr_aliases,
             "coverage": coverage,
             "unreported_cases": unreported_cases,
             "state_decisions": {},
             "unreported_decisions": {},
             "protocol_decisions": {},
-            "audit_entries": [],
+            "audit_entries": qr_audit_entries,
         }
         st.session_state.audit_step = 1
         st.rerun()
