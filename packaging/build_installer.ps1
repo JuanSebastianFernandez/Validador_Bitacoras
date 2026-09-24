@@ -34,7 +34,7 @@ try {
         throw "Inno Setup terminó con error."
     }
 
-    Write-Host "Instalador creado en release\RevisorBitacoras-Setup-1.0.0.exe"
+    Write-Host "Instalador creado en release\RevisorBitacoras-Setup-1.0.1.exe"
 }
 finally {
     Pop-Location

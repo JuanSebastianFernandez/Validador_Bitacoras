@@ -1,12 +1,12 @@
 # Instalación para el usuario
 
-El instalador está en `release/RevisorBitacoras-Setup-1.0.0.exe`. La persona que
+El instalador está en `release/RevisorBitacoras-Setup-1.0.1.exe`. La persona que
 va a usar el sistema no necesita instalar Python, Streamlit ni dependencias, y la
 instalación se realiza únicamente para su usuario de Windows.
 
 ## Paso a paso
 
-1. Copia `RevisorBitacoras-Setup-1.0.0.exe` al computador donde se usará el
+1. Copia `RevisorBitacoras-Setup-1.0.1.exe` al computador donde se usará el
    sistema. No lo ejecutes directamente desde un correo o una carpeta comprimida.
 2. Haz doble clic en el instalador.
 3. Si Windows SmartScreen muestra **Windows protegió su PC**, confirma que el
@@ -39,4 +39,3 @@ En Windows abre **Configuración > Aplicaciones > Aplicaciones instaladas**, bus
 Revisa el archivo `%LOCALAPPDATA%\RevisaBitacoras\app.log`. Si la empresa bloquea
 programas internos sin firma digital, el área de TI deberá autorizar el instalador
 o firmarlo con el certificado corporativo.
-

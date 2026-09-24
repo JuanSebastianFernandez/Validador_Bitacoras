@@ -159,7 +159,7 @@ locales están excluidos mediante `.gitignore` y no deben subirse al repositorio
 ## Instalador de Windows
 
 El instalador autónomo se genera en
-`release/RevisorBitacoras-Setup-1.0.0.exe`. Incluye Python, Streamlit, las
+`release/RevisorBitacoras-Setup-1.0.1.exe`. Incluye Python, Streamlit, las
 dependencias y la plantilla F-AGP-04, por lo que el usuario final no debe instalar
 nada adicional. El manual para compartir con el usuario está en
 [`INSTALACION.md`](INSTALACION.md).
