@@ -23,6 +23,9 @@ tmp/
 analysis/
 node_modules/
 *.log
+build/
+dist/
+release/
 
 # Operational source files (never commit production data)
 *-exported-logs.csv

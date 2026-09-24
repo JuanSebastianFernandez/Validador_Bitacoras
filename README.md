@@ -155,3 +155,22 @@ se conserva la antigua ruta de Drive únicamente como respaldo.
 
 Los archivos operativos, exportaciones, resultados, entornos virtuales y secretos
 locales están excluidos mediante `.gitignore` y no deben subirse al repositorio.
+
+## Instalador de Windows
+
+El instalador autónomo se genera en
+`release/RevisorBitacoras-Setup-1.0.0.exe`. Incluye Python, Streamlit, las
+dependencias y la plantilla F-AGP-04, por lo que el usuario final no debe instalar
+nada adicional. El manual para compartir con el usuario está en
+[`INSTALACION.md`](INSTALACION.md).
+
+Para reconstruir una nueva versión en el equipo de desarrollo:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File packaging\build_installer.ps1
+```
+
+La aplicación instalada abre el navegador y mantiene un icono verde en el área de
+notificaciones para volver a abrirla o cerrarla por completo. El servidor escucha
+exclusivamente en `127.0.0.1`; no queda expuesto a otros equipos de la red.
