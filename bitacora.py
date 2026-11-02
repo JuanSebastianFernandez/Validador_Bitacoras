@@ -21,6 +21,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 SHEET_NEW = "Flujo Nuevo"
 SHEET_OLD = "Flujo Viejo"
+SHEET_FLOW20 = "Flujo 2.0"
 SHEET_PNC = "PNC"
 SHEET_RESULT = "Resultado Validacion"
 SHEET_EMAIL_RESULT = "Validacion Correos"
@@ -48,6 +49,7 @@ FALLBACK_LOGO_PATH = (
 CODED_HEADER_SHEETS = (
     SHEET_NEW,
     SHEET_OLD,
+    SHEET_FLOW20,
     "Odm",
     "Correo-Rotulacion",
     SHEET_PNC,
@@ -56,6 +58,7 @@ CODED_HEADER_SHEETS = (
 OPERATIONAL_SHEET_KEYS = {
     SHEET_NEW: "QR",
     SHEET_OLD: "QR",
+    SHEET_FLOW20: "QR",
     "Odm": "QR",
     "Correo-Rotulacion": "ASUNTO",
     SHEET_PNC: "QR/ASUNTO",
@@ -65,6 +68,13 @@ LOGO_HEIGHT_PX = 80
 ARRIVAL_DATETIME_HEADER = "FECHA/HORA DE LLEGADA"
 EXIT_DATETIME_HEADER = "FECHA/HORA DE SALIDA"
 TIMING_HEADERS = (ARRIVAL_DATETIME_HEADER, EXIT_DATETIME_HEADER)
+ODM_DATETIME_HEADER = "FECHA/HORA ENTREGA ODM"
+DRAWING_DATETIME_HEADER = "FECHA/HORA ENTREGA DIBUJO"
+FLOW20_TIMING_HEADERS = (
+    ARRIVAL_DATETIME_HEADER,
+    ODM_DATETIME_HEADER,
+    DRAWING_DATETIME_HEADER,
+)
 EXCEL_DATETIME_FORMAT = "dd/mm/yyyy hh:mm:ss"
 
 LEGACY_STATES = {
@@ -80,7 +90,24 @@ NEW_STATES = {
     "verify_formats",
     "drawing_review",
 }
-ALL_DRAWING_STATES = LEGACY_STATES | NEW_STATES
+FLOW20_ODM_STATE = "3-ODM Asignadas"
+FLOW20_STATES = {
+    "2-Valorizado",
+    "2.5-Enviado a dibujo",
+    "2.6-Dibujante asignado",
+    FLOW20_ODM_STATE,
+}
+FLOW20_SECONDARY_PENDING = "ODM_Creada-Pendiente_Dibujo"
+FLOW20_SECONDARY_COMPLETED = "ODM_Creada-Dibujo_Finalizado"
+FLOW20_SECONDARY_STATES = {
+    FLOW20_SECONDARY_PENDING,
+    FLOW20_SECONDARY_COMPLETED,
+}
+FLOW20_ODM_ENTRY_INITIAL_STATES = {
+    "2-Valorizado",
+    "2.6-Dibujante asignado",
+}
+ALL_DRAWING_STATES = LEGACY_STATES | NEW_STATES | {FLOW20_ODM_STATE}
 FINAL_ELEMENT_STATES = {"2.7-Dibujo finalizado", "drawing_review"}
 REJECTION_STATES = {"2-Valorizado", "2.6.1-Dibujo en revision", "verify_formats"}
 LEGACY_ARRIVAL_STATES = {"2.5-Enviado a dibujo", "2.6-Dibujante asignado"}
@@ -154,6 +181,7 @@ STATUS_MISMATCH = "No coincide"
 STATUS_NO_EVENT = "Sin movimiento en la fecha"
 STATUS_NO_QR = "Sin QR"
 STATUS_PROFESSIONAL_MISMATCH = "Revisión obligatoria: profesional PMS diferente"
+STATUS_FLOW20_AMBIGUOUS = "Revisión obligatoria: evidencia temporal insuficiente"
 STATUS_AUDIT_KEEP = "Aprobado: conservar bitácora"
 STATUS_AUDIT_CORRECTED = "Corregido en auditoría"
 STATUS_AUDIT_EXCLUDED = "Excluido en auditoría"
@@ -186,6 +214,9 @@ TIMING_NO_ARRIVAL = "Salida encontrada; llegada no localizada"
 TIMING_NO_EXIT = "Salida del profesional no localizada"
 TIMING_NOT_APPLICABLE = "No aplica: estado sin salida"
 TIMING_MANUAL = "Fechas confirmadas en auditoría"
+TIMING_FLOW20_PENDING = "ODM capturada; dibujo pendiente"
+TIMING_FLOW20_COMPLETED = "ODM y dibujo capturados"
+TIMING_FLOW20_AMBIGUOUS = "ODM capturada; fecha de dibujo no demostrable"
 
 LOG_REQUIRED_COLUMNS = {"request_code", "final_state", "date_created"}
 LOG_OPTIONAL_COLUMNS = {
@@ -193,6 +224,16 @@ LOG_OPTIONAL_COLUMNS = {
     "comments",
     "username",
     "user_created_last_name",
+}
+REQUEST_REQUIRED_COLUMNS = {"request_code", "contract_drawing_completed"}
+REQUEST_OPTIONAL_COLUMNS = {
+    "status",
+    "new_fulfillment_process",
+    "date_created",
+    "odm",
+    "agp_project",
+    "agp_increment",
+    "protocol",
 }
 EXPORT_REQUIRED_COLUMNS = {
     "PROTOCOLLO AP",
@@ -247,6 +288,18 @@ class LogCoverage:
     @property
     def last_date(self) -> date | None:
         return self.last_datetime.date() if self.last_datetime else None
+
+
+@dataclass(frozen=True)
+class RequestSnapshot:
+    qr: str
+    drawing_completed: bool | None
+    status: str = ""
+    new_fulfillment_process: bool | None = None
+    captured_at: datetime | None = None
+    odm: str = ""
+    agp: str = ""
+    protocol: str = ""
 
 
 @dataclass(frozen=True)
@@ -329,6 +382,9 @@ class ValidationRow:
     result: str
     professional: str = ""
     pms_actor: str = ""
+    reported_secondary_state: str = ""
+    agp: str = ""
+    odm: str = ""
     protocol: str = ""
     reported_pel: Any = None
     reported_tratas: Any = None
@@ -344,6 +400,11 @@ class ValidationRow:
     exit_datetime: datetime | None = None
     timing_result: str = TIMING_NOT_APPLICABLE
     timing_source: str = ""
+    request_drawing_completed: bool | None = None
+    request_status: str = ""
+    odm_datetime: datetime | None = None
+    drawing_datetime: datetime | None = None
+    flow20_evidence: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -358,11 +419,19 @@ class ValidationRow:
             "Resultado": self.result,
             "Profesional bitácora": self.professional,
             "Profesional PMS": self.pms_actor,
+            "Estado secundario reportado": self.reported_secondary_state,
             "Estado de llegada": self.arrival_state,
             "Fecha/hora de llegada": self.arrival_datetime,
             "Fecha/hora de salida": self.exit_datetime,
+            "Fecha/hora entrega ODM": self.odm_datetime,
+            "Fecha/hora entrega dibujo": self.drawing_datetime,
             "Resultado tiempos": self.timing_result,
             "Fuente tiempos": self.timing_source,
+            "Drawing Completed request": self.request_drawing_completed,
+            "Estado actual request": self.request_status,
+            "Evidencia Flujo 2.0": self.flow20_evidence,
+            "AGP": self.agp,
+            "ODM": self.odm,
             "Protocolo": self.protocol,
             "Cantidad PEL reportada": self.reported_pel,
             "Cantidad TRATAS reportada": self.reported_tratas,
@@ -405,6 +474,15 @@ def normalize_identifier(value: Any) -> str:
     if re.fullmatch(r"\d+\.0+", text):
         return text.split(".", 1)[0]
     return text
+
+
+def parse_optional_bool(value: Any) -> bool | None:
+    key = normalize_text(value).strip().lower()
+    if key in {"true", "1", "yes", "si", "sí"}:
+        return True
+    if key in {"false", "0", "no"}:
+        return False
+    return None
 
 
 def _pms_name_tokens(value: Any) -> tuple[str, ...]:
@@ -642,8 +720,29 @@ def canonicalize_state(value: Any) -> str:
         "assigned draftsman": "assigned_draftsman",
         "verify formats": "verify_formats",
         "drawing review": "drawing_review",
+        "3": FLOW20_ODM_STATE,
+        "3 odm asignadas": FLOW20_ODM_STATE,
+        "3-odm asignadas": FLOW20_ODM_STATE,
     }
     return aliases.get(key, raw)
+
+
+def canonicalize_flow20_secondary(value: Any) -> str:
+    normalized = normalize_header(value)
+    compact = re.sub(r"[^A-Z0-9]+", "", normalized)
+    aliases = {
+        "ODMCREADAPENDIENTEDIBUJO": FLOW20_SECONDARY_PENDING,
+        "ODMCREADADIBUJOFINALIZADO": FLOW20_SECONDARY_COMPLETED,
+    }
+    return aliases.get(compact, normalize_text(value))
+
+
+def validation_requires_element_counts(item: ValidationRow) -> bool:
+    return item.reported_state in FINAL_ELEMENT_STATES or (
+        item.sheet == SHEET_FLOW20
+        and item.reported_state == FLOW20_ODM_STATE
+        and item.reported_secondary_state == FLOW20_SECONDARY_COMPLETED
+    )
 
 
 def parse_production_date(filename: str) -> date:
@@ -713,7 +812,10 @@ def extract_workbook_rows(
         raise BitacoraError(f"Faltan las hojas requeridas: {', '.join(missing_sheets)}.")
 
     rows: list[dict[str, Any]] = []
-    for sheet_name in (SHEET_NEW, SHEET_OLD):
+    validation_sheets = [SHEET_NEW, SHEET_OLD]
+    if SHEET_FLOW20 in wb.sheetnames:
+        validation_sheets.append(SHEET_FLOW20)
+    for sheet_name in validation_sheets:
         ws = wb[sheet_name]
         header_row = _detect_header_row(ws, {"QR", "ESTADO DE LA OT"})
         headers = _header_map(ws, header_row=header_row)
@@ -730,6 +832,9 @@ def extract_workbook_rows(
         tratas_col = headers.get("CANTIDAD TRATAS")
         observation_col = headers.get("OBSERVACIONES")
         user_col = headers.get("USUARIO")
+        secondary_col = headers.get("ESTADO SECUNDARIO")
+        odm_col = headers.get("ODM")
+        delivered_col = headers.get("FECHA ENTREGADO")
         for row_number in range(header_row + 1, ws.max_row + 1):
             qr = normalize_text(ws.cell(row_number, qr_col).value)
             state = canonicalize_state(ws.cell(row_number, state_col).value)
@@ -741,6 +846,13 @@ def extract_workbook_rows(
                     "excel_row": row_number,
                     "qr": qr,
                     "reported_state": state,
+                    "reported_secondary_state": (
+                        canonicalize_flow20_secondary(
+                            ws.cell(row_number, secondary_col).value
+                        )
+                        if secondary_col
+                        else ""
+                    ),
                     "professional": (
                         normalize_text(ws.cell(row_number, user_col).value)
                         if user_col
@@ -755,6 +867,16 @@ def extract_workbook_rows(
                         normalize_identifier(ws.cell(row_number, protocol_col).value)
                         if protocol_col
                         else ""
+                    ),
+                    "odm": (
+                        normalize_identifier(ws.cell(row_number, odm_col).value)
+                        if odm_col
+                        else ""
+                    ),
+                    "reported_delivery_date": (
+                        ws.cell(row_number, delivered_col).value
+                        if delivered_col
+                        else None
                     ),
                     "reported_pel": ws.cell(row_number, pel_col).value if pel_col else None,
                     "reported_tratas": (
@@ -826,6 +948,100 @@ def apply_qr_alias_corrections(
         return output.getvalue(), updated_rows, audit_entries
     finally:
         wb.close()
+
+
+def read_request_snapshots(
+    request_source: str | Path | BinaryIO | bytes,
+    qrs: set[str] | None = None,
+    *,
+    chunksize: int = 200_000,
+) -> dict[str, RequestSnapshot]:
+    """Read the current PMS request snapshot used by Flujo 2.0."""
+    source = _rewind(request_source)
+    targets = (
+        {normalize_text(qr) for qr in qrs if normalize_text(qr)}
+        if qrs is not None
+        else None
+    )
+    snapshots: dict[str, RequestSnapshot] = {}
+    try:
+        chunks = pd.read_csv(
+            source,
+            sep=";",
+            usecols=lambda column: column
+            in REQUEST_REQUIRED_COLUMNS | REQUEST_OPTIONAL_COLUMNS,
+            dtype=str,
+            encoding="utf-8-sig",
+            chunksize=chunksize,
+            on_bad_lines="skip",
+            low_memory=False,
+        )
+        saw_required_columns = False
+        for chunk in chunks:
+            if not REQUEST_REQUIRED_COLUMNS.issubset(chunk.columns):
+                continue
+            saw_required_columns = True
+            for column in REQUEST_OPTIONAL_COLUMNS:
+                if column not in chunk.columns:
+                    chunk[column] = ""
+            chunk = chunk.copy()
+            chunk["normalized_qr"] = chunk["request_code"].map(normalize_text)
+            if targets is not None:
+                chunk = chunk[chunk["normalized_qr"].isin(targets)]
+            if chunk.empty:
+                continue
+            chunk["parsed_date"] = pd.to_datetime(
+                chunk["date_created"], errors="coerce", format="mixed"
+            )
+            for record in chunk.itertuples(index=False):
+                qr = record.normalized_qr
+                captured_at = (
+                    record.parsed_date.to_pydatetime()
+                    if not pd.isna(record.parsed_date)
+                    else None
+                )
+                snapshot = RequestSnapshot(
+                    qr=qr,
+                    drawing_completed=parse_optional_bool(
+                        record.contract_drawing_completed
+                    ),
+                    status=canonicalize_state(record.status),
+                    new_fulfillment_process=parse_optional_bool(
+                        record.new_fulfillment_process
+                    ),
+                    captured_at=captured_at,
+                    odm=normalize_identifier(record.odm),
+                    agp=(
+                        normalize_identifier(record.agp_project)
+                        or normalize_identifier(record.agp_increment)
+                    ),
+                    protocol=normalize_identifier(record.protocol),
+                )
+                previous = snapshots.get(qr)
+                if (
+                    previous is None
+                    or previous.captured_at is None
+                    or (
+                        captured_at is not None
+                        and captured_at >= previous.captured_at
+                    )
+                ):
+                    snapshots[qr] = snapshot
+        if not saw_required_columns:
+            raise BitacoraError(
+                "El exported-request no contiene request_code y "
+                "contract_drawing_completed."
+            )
+        return snapshots
+    except BitacoraError:
+        raise
+    except ValueError as exc:
+        raise BitacoraError(
+            "El exported-request no contiene request_code y "
+            "contract_drawing_completed."
+        ) from exc
+    except Exception as exc:
+        raise BitacoraError("No pude leer el archivo exported-request.csv.") from exc
 
 
 def read_export_protocol_counts(
@@ -1149,6 +1365,44 @@ def _collect_timeline_events(
             continue
         chunk["final_state"] = chunk["final_state"].map(canonicalize_state)
         chunk = chunk[chunk["final_state"].isin(ALL_DRAWING_STATES)]
+        for record in chunk.itertuples(index=False):
+            event = _drawing_event_from_record(record)
+            timelines.setdefault(event.qr, []).append(event)
+    return {
+        qr: _sorted_unique_timeline(events)
+        for qr, events in timelines.items()
+    }
+
+
+def read_full_log_timelines(
+    log_source: str | Path | BinaryIO | bytes,
+    qrs: set[str],
+    *,
+    chunksize: int = 250_000,
+) -> dict[str, list[DrawingLogEvent]]:
+    """Read the complete history for a bounded QR set, including territory states."""
+    targets = {normalize_text(qr) for qr in qrs if normalize_text(qr)}
+    timelines: dict[str, list[DrawingLogEvent]] = {}
+    if not targets:
+        return timelines
+    for chunk in _read_log_chunks(log_source, chunksize=chunksize):
+        if not LOG_REQUIRED_COLUMNS.issubset(chunk.columns):
+            continue
+        chunk = chunk.copy()
+        chunk["parsed_date"] = pd.to_datetime(
+            chunk["date_created"], errors="coerce", format="mixed"
+        )
+        chunk["normalized_qr"] = chunk["request_code"].map(normalize_text)
+        for column in LOG_OPTIONAL_COLUMNS:
+            if column not in chunk.columns:
+                chunk[column] = ""
+        chunk = chunk[
+            chunk["normalized_qr"].isin(targets)
+            & chunk["parsed_date"].notna()
+        ].copy()
+        if chunk.empty:
+            continue
+        chunk["final_state"] = chunk["final_state"].map(canonicalize_state)
         for record in chunk.itertuples(index=False):
             event = _drawing_event_from_record(record)
             timelines.setdefault(event.qr, []).append(event)
@@ -1581,6 +1835,291 @@ def _cycle_arrival_for_exit(
     return min(arrivals, key=lambda event: event.occurred_at, default=None)
 
 
+def _flow20_odm_event(
+    events: Iterable[DrawingLogEvent],
+    cutoff_end: datetime,
+) -> DrawingLogEvent | None:
+    candidates = [
+        event
+        for event in events
+        if event.occurred_at < cutoff_end
+        and event.state == FLOW20_ODM_STATE
+        and event.initial_state in FLOW20_ODM_ENTRY_INITIAL_STATES
+        and event.initial_state != event.state
+    ]
+    return max(candidates, key=lambda event: event.occurred_at, default=None)
+
+
+def _flow20_arrival_for_odm(
+    events: Iterable[DrawingLogEvent],
+    odm_event: DrawingLogEvent,
+) -> DrawingLogEvent | None:
+    ordered = sorted(
+        (event for event in events if event.occurred_at < odm_event.occurred_at),
+        key=lambda event: event.occurred_at,
+    )
+    previous_outputs = [
+        event
+        for event in ordered
+        if event.state in {"2-Valorizado", FLOW20_ODM_STATE}
+        and event.initial_state != event.state
+    ]
+    boundary = max(
+        (event.occurred_at for event in previous_outputs),
+        default=datetime.min,
+    )
+    arrivals = [
+        event
+        for event in ordered
+        if boundary < event.occurred_at < odm_event.occurred_at
+        and event.state in LEGACY_ARRIVAL_STATES
+        and event.initial_state != event.state
+    ]
+    arrival = min(arrivals, key=lambda event: event.occurred_at, default=None)
+    if arrival is not None:
+        return arrival
+    if odm_event.initial_state == "2-Valorizado":
+        direct_arrivals = [
+            event
+            for event in ordered
+            if event.state == "2-Valorizado"
+            and event.initial_state != event.state
+        ]
+        return max(
+            direct_arrivals,
+            key=lambda event: event.occurred_at,
+            default=None,
+        )
+    return None
+
+
+def _flow20_is_technical_repeat(event: DrawingLogEvent) -> bool:
+    comment = normalize_header(event.comment)
+    technical_markers = (
+        "DRAWING ASSIGNMENT",
+        "DRAWING REASSIGNMENT",
+        "REASSIGNED",
+        "REASIGNACION",
+        "MARCACION DE NODOS",
+    )
+    return any(marker in comment for marker in technical_markers)
+
+
+def _flow20_drawing_event(
+    events: Iterable[DrawingLogEvent],
+    odm_event: DrawingLogEvent,
+    professional: str,
+) -> DrawingLogEvent | None:
+    candidates = [
+        event
+        for event in events
+        if event.occurred_at > odm_event.occurred_at
+        and event.initial_state
+        and event.initial_state == event.state
+        and not _flow20_is_technical_repeat(event)
+        and same_professional(professional, event.username, event.user_name)
+    ]
+    return min(candidates, key=lambda event: event.occurred_at, default=None)
+
+
+def _validate_flow20_row(
+    row: dict[str, Any],
+    previous_event: LogState | None,
+    request_snapshot: RequestSnapshot | None,
+    events: list[DrawingLogEvent],
+    production_date: date,
+) -> ValidationRow:
+    qr = normalize_text(row.get("qr"))
+    reported = canonicalize_state(row.get("reported_state"))
+    secondary = canonicalize_flow20_secondary(
+        row.get("reported_secondary_state")
+    )
+    professional = normalize_text(row.get("professional"))
+    cutoff_end = datetime.combine(
+        production_date + timedelta(days=1), datetime.min.time()
+    )
+    odm_event = _flow20_odm_event(events, cutoff_end)
+    arrival = _flow20_arrival_for_odm(events, odm_event) if odm_event else None
+    drawing_event = (
+        _flow20_drawing_event(events, odm_event, professional)
+        if odm_event and request_snapshot is not None
+        and request_snapshot.drawing_completed is True
+        else None
+    )
+    drawing_as_of = (
+        drawing_event
+        if drawing_event is not None and drawing_event.occurred_at < cutoff_end
+        else None
+    )
+    future_drawing = (
+        drawing_event
+        if drawing_event is not None and drawing_event.occurred_at >= cutoff_end
+        else None
+    )
+    simultaneous = bool(
+        odm_event
+        and odm_event.occurred_at.date() == production_date
+        and request_snapshot is not None
+        and request_snapshot.drawing_completed is True
+        and drawing_event is None
+    )
+    drawing_datetime = (
+        drawing_as_of.occurred_at
+        if drawing_as_of is not None
+        else odm_event.occurred_at
+        if simultaneous and odm_event is not None
+        else None
+    )
+    drawing_actor = drawing_as_of or (odm_event if simultaneous else None)
+    actor_event = drawing_actor or odm_event
+    professional_mismatch = bool(
+        actor_event
+        and professional
+        and not same_professional(
+            professional,
+            actor_event.username,
+            actor_event.user_name,
+        )
+    )
+    request_flag = (
+        request_snapshot.drawing_completed if request_snapshot else None
+    )
+    new_flow_flag = (
+        request_snapshot.new_fulfillment_process if request_snapshot else None
+    )
+
+    evidence_parts: list[str] = []
+    if odm_event:
+        evidence_parts.append(
+            f"ODM: {odm_event.initial_state} → {odm_event.state} "
+            f"({odm_event.occurred_at:%d/%m/%Y %H:%M:%S})"
+        )
+    else:
+        evidence_parts.append("ODM no localizada")
+    if drawing_as_of:
+        evidence_parts.append(
+            f"Dibujo: repetición {drawing_as_of.state} "
+            f"({drawing_as_of.occurred_at:%d/%m/%Y %H:%M:%S})"
+        )
+    elif simultaneous:
+        evidence_parts.append("Dibujo inferido como entrega simultánea con la ODM")
+    elif future_drawing:
+        evidence_parts.append(
+            f"Dibujo posterior al corte: {future_drawing.occurred_at:%d/%m/%Y %H:%M:%S}"
+        )
+    elif request_flag is True:
+        evidence_parts.append("Drawing Completed=True sin evento fechable")
+    elif request_flag is False:
+        evidence_parts.append("Drawing Completed=False")
+    else:
+        evidence_parts.append("Drawing Completed sin dato")
+
+    result = STATUS_MISMATCH
+    timing_result = TIMING_FLOW20_AMBIGUOUS
+    if not qr:
+        result = STATUS_NO_QR
+    elif reported == FLOW20_ODM_STATE:
+        if odm_event is None or request_snapshot is None:
+            result = STATUS_NO_EVENT
+        elif new_flow_flag is False:
+            result = STATUS_MISMATCH
+        elif professional_mismatch:
+            result = STATUS_PROFESSIONAL_MISMATCH
+        elif secondary == FLOW20_SECONDARY_PENDING:
+            if drawing_datetime is not None:
+                result = STATUS_MISMATCH
+            elif request_flag is False or future_drawing is not None:
+                result = STATUS_MATCH
+                timing_result = TIMING_FLOW20_PENDING
+            else:
+                result = STATUS_FLOW20_AMBIGUOUS
+        elif secondary == FLOW20_SECONDARY_COMPLETED:
+            if (
+                drawing_datetime is not None
+                and drawing_datetime.date() == production_date
+                and request_flag is True
+            ):
+                result = STATUS_MATCH
+                timing_result = TIMING_FLOW20_COMPLETED
+            elif request_flag is True and drawing_datetime is None:
+                result = STATUS_FLOW20_AMBIGUOUS
+            else:
+                result = STATUS_MISMATCH
+        else:
+            result = STATUS_MISMATCH
+    else:
+        day_events = [
+            event
+            for event in events
+            if event.occurred_at.date() == production_date
+            and event.state in FLOW20_STATES
+        ]
+        day_event = max(day_events, key=lambda event: event.occurred_at, default=None)
+        if day_event is None:
+            result = STATUS_NO_EVENT
+        elif (
+            professional
+            and day_event.state in {"2-Valorizado", FLOW20_ODM_STATE}
+            and not same_professional(
+                professional, day_event.username, day_event.user_name
+            )
+        ):
+            result = STATUS_PROFESSIONAL_MISMATCH
+        elif day_event.state == reported:
+            result = STATUS_MATCH
+        else:
+            result = STATUS_MISMATCH
+        actor_event = day_event
+        timing_result = TIMING_NOT_APPLICABLE
+
+    pms_state = (
+        FLOW20_ODM_STATE
+        if odm_event and reported == FLOW20_ODM_STATE
+        else actor_event.state
+        if actor_event
+        else ""
+    )
+    pms_datetime = (
+        drawing_datetime
+        if secondary == FLOW20_SECONDARY_COMPLETED and drawing_datetime
+        else odm_event.occurred_at
+        if odm_event and reported == FLOW20_ODM_STATE
+        else actor_event.occurred_at
+        if actor_event
+        else None
+    )
+    return ValidationRow(
+        sheet=SHEET_FLOW20,
+        excel_row=int(row["excel_row"]),
+        qr=qr,
+        reported_state=reported,
+        pms_state=pms_state,
+        pms_datetime=pms_datetime,
+        previous_state=previous_event.state if previous_event else "",
+        previous_datetime=previous_event.occurred_at if previous_event else None,
+        result=result,
+        professional=professional,
+        pms_actor=actor_event.actor if actor_event else "",
+        reported_secondary_state=secondary,
+        agp=normalize_identifier(row.get("agp")),
+        odm=normalize_identifier(row.get("odm")),
+        protocol=normalize_identifier(row.get("protocol")),
+        reported_pel=row.get("reported_pel"),
+        reported_tratas=row.get("reported_tratas"),
+        count_result=COUNT_NOT_EVALUATED,
+        arrival_state=arrival.state if arrival else "",
+        arrival_datetime=arrival.occurred_at if arrival else None,
+        exit_datetime=drawing_datetime or (odm_event.occurred_at if odm_event else None),
+        timing_result=timing_result,
+        timing_source="PMS" if odm_event else "",
+        request_drawing_completed=request_flag,
+        request_status=request_snapshot.status if request_snapshot else "",
+        odm_datetime=odm_event.occurred_at if odm_event else None,
+        drawing_datetime=drawing_datetime,
+        flow20_evidence=" | ".join(evidence_parts),
+    )
+
+
 def apply_drawing_timings(
     validations: list[ValidationRow],
     timelines: dict[str, list[DrawingLogEvent]],
@@ -1589,6 +2128,9 @@ def apply_drawing_timings(
     """Attach the current drawing cycle's exact arrival and professional exit."""
     updated: list[ValidationRow] = []
     for item in validations:
+        if item.sheet == SHEET_FLOW20:
+            updated.append(item)
+            continue
         if item.reported_state not in DRAWING_OUTPUT_STATES:
             updated.append(
                 replace(
@@ -1701,6 +2243,58 @@ def _manual_timing_fields(
     return {}
 
 
+def _manual_flow20_timing_fields(
+    decision: dict[str, Any],
+    target_state: str,
+    secondary_state: str,
+) -> dict[str, Any]:
+    if target_state != FLOW20_ODM_STATE:
+        return {
+            "arrival_state": "",
+            "arrival_datetime": None,
+            "exit_datetime": None,
+            "odm_datetime": None,
+            "drawing_datetime": None,
+            "timing_result": TIMING_NOT_APPLICABLE,
+            "timing_source": "",
+        }
+    arrival = parse_audit_datetime(decision.get("arrival_datetime"))
+    odm_datetime = parse_audit_datetime(decision.get("odm_datetime"))
+    drawing_datetime = parse_audit_datetime(decision.get("drawing_datetime"))
+    if not arrival or not odm_datetime:
+        raise BitacoraError(
+            "Para Flujo 2.0 debes confirmar la llegada y la entrega de la ODM."
+        )
+    if arrival > odm_datetime:
+        raise BitacoraError(
+            "La fecha/hora de llegada no puede ser posterior a la entrega de la ODM."
+        )
+    if secondary_state == FLOW20_SECONDARY_COMPLETED:
+        if not drawing_datetime:
+            raise BitacoraError(
+                "Para un dibujo finalizado debes confirmar la fecha/hora del dibujo."
+            )
+        if drawing_datetime < odm_datetime:
+            raise BitacoraError(
+                "La entrega del dibujo no puede ser anterior a la entrega de la ODM."
+            )
+        timing_result = TIMING_FLOW20_COMPLETED
+    else:
+        if drawing_datetime:
+            raise BitacoraError(
+                "Un caso pendiente de dibujo no debe tener fecha de entrega del dibujo."
+            )
+        timing_result = TIMING_FLOW20_PENDING
+    return {
+        "arrival_datetime": arrival,
+        "exit_datetime": drawing_datetime or odm_datetime,
+        "odm_datetime": odm_datetime,
+        "drawing_datetime": drawing_datetime,
+        "timing_result": timing_result,
+        "timing_source": "Auditoría",
+    }
+
+
 def validate_rows(
     rows: list[dict[str, Any]],
     latest_on_day: dict[str, LogState],
@@ -1709,6 +2303,7 @@ def validate_rows(
     rejection_comments: dict[tuple[str, str], LogState] | None = None,
     timelines: dict[str, list[DrawingLogEvent]] | None = None,
     production_date: date | None = None,
+    request_snapshots: dict[str, RequestSnapshot] | None = None,
 ) -> list[ValidationRow]:
     validations: list[ValidationRow] = []
     for row in rows:
@@ -1716,6 +2311,17 @@ def validate_rows(
         reported = canonicalize_state(row["reported_state"])
         day_event = latest_on_day.get(qr)
         previous_event = latest_as_of.get(qr)
+        if row["sheet"] == SHEET_FLOW20 and production_date is not None:
+            validations.append(
+                _validate_flow20_row(
+                    row,
+                    previous_event,
+                    (request_snapshots or {}).get(qr),
+                    (timelines or {}).get(qr, []),
+                    production_date,
+                )
+            )
+            continue
         professional = normalize_text(row.get("professional"))
         professional_mismatch = False
         if (
@@ -1852,6 +2458,11 @@ def validate_rows(
                 result=result,
                 professional=professional,
                 pms_actor=day_event.actor if day_event else "",
+                reported_secondary_state=canonicalize_flow20_secondary(
+                    row.get("reported_secondary_state")
+                ),
+                agp=normalize_identifier(row.get("agp")),
+                odm=normalize_identifier(row.get("odm")),
                 protocol=protocol,
                 reported_pel=reported_pel,
                 reported_tratas=reported_tratas,
@@ -1958,17 +2569,37 @@ def apply_state_audit_decisions(
             "Hoja/Flujo": item.sheet,
             "QR/Referencia": item.qr,
             "Estado inicial": item.reported_state,
+            "Estado secundario": item.reported_secondary_state,
             "AGP": normalize_identifier(decision.get("agp")),
             "Protocolo": normalize_identifier(decision.get("protocol")),
+            "ODM": normalize_identifier(decision.get("odm")),
             "Fecha/hora de llegada": normalize_text(
                 decision.get("arrival_datetime")
             ),
             "Fecha/hora de salida": normalize_text(
                 decision.get("exit_datetime")
             ),
+            "Fecha/hora entrega ODM": normalize_text(
+                decision.get("odm_datetime")
+            ),
+            "Fecha/hora entrega dibujo": normalize_text(
+                decision.get("drawing_datetime")
+            ),
         }
         if action == "keep":
-            timing_fields = _manual_timing_fields(decision, item.reported_state)
+            secondary_state = canonicalize_flow20_secondary(
+                decision.get("secondary_state")
+                or item.reported_secondary_state
+            )
+            timing_fields = (
+                _manual_flow20_timing_fields(
+                    decision,
+                    item.reported_state,
+                    secondary_state,
+                )
+                if item.sheet == SHEET_FLOW20
+                else _manual_timing_fields(decision, item.reported_state)
+            )
             observation = ""
             observation_result = item.observation_result
             if item.reported_state in REJECTION_STATES:
@@ -1990,8 +2621,17 @@ def apply_state_audit_decisions(
                 replace(
                     item,
                     result=STATUS_AUDIT_KEEP,
+                    reported_secondary_state=secondary_state,
                     pms_observation=observation or item.pms_observation,
                     observation_result=observation_result,
+                    flow20_evidence=(
+                        f"{item.flow20_evidence} | Fechas confirmadas por auditoría"
+                        if item.sheet == SHEET_FLOW20
+                        and item.flow20_evidence
+                        else "Fechas confirmadas por auditoría"
+                        if item.sheet == SHEET_FLOW20
+                        else item.flow20_evidence
+                    ),
                     **timing_fields,
                 )
             )
@@ -2000,6 +2640,7 @@ def apply_state_audit_decisions(
                     **base_entry,
                     "Decisión": "Conservar bitácora",
                     "Estado final": item.reported_state,
+                    "Estado secundario": secondary_state,
                     "Detalle": (
                         "El auditor confirmó la información reportada y se recuperó "
                         "la devolución más reciente del mismo estado."
@@ -2028,19 +2669,44 @@ def apply_state_audit_decisions(
         target_state = canonicalize_state(
             decision.get("state") or item.pms_state or item.reported_state
         )
-        timing_fields = _manual_timing_fields(decision, target_state)
+        secondary_state = canonicalize_flow20_secondary(
+            decision.get("secondary_state")
+            or item.reported_secondary_state
+        )
+        if item.sheet == SHEET_FLOW20 and target_state == FLOW20_ODM_STATE:
+            if secondary_state not in FLOW20_SECONDARY_STATES:
+                wb.close()
+                raise BitacoraError(
+                    "Para el estado 3-ODM Asignadas debes indicar si el dibujo "
+                    "quedó pendiente o finalizado."
+                )
+            timing_fields = _manual_flow20_timing_fields(
+                decision,
+                target_state,
+                secondary_state,
+            )
+        else:
+            timing_fields = _manual_timing_fields(decision, target_state)
         ws = wb[item.sheet]
         headers = headers_for(item.sheet)
 
         ws.cell(item.excel_row, headers["ESTADO DE LA OT"]).value = target_state
         agp = normalize_identifier(decision.get("agp"))
         protocol = normalize_identifier(decision.get("protocol"))
-        write_element_data = target_state in FINAL_ELEMENT_STATES
+        odm = normalize_identifier(decision.get("odm"))
+        is_flow20_odm = item.sheet == SHEET_FLOW20 and target_state == FLOW20_ODM_STATE
+        write_element_data = target_state in FINAL_ELEMENT_STATES or is_flow20_odm
+        requires_quantity_validation = (
+            target_state in FINAL_ELEMENT_STATES
+            or is_flow20_odm
+            and secondary_state == FLOW20_SECONDARY_COMPLETED
+        )
         if write_element_data:
-            if not agp or not protocol:
+            if not agp or not protocol or (is_flow20_odm and not odm):
                 wb.close()
                 raise BitacoraError(
-                    "Para corregir un caso a dibujo finalizado debes indicar AGP y protocolo."
+                    "Para corregir este caso debes indicar AGP, protocolo"
+                    + (" y ODM." if is_flow20_odm else ".")
                 )
             if has_invalid_agp_separator(agp):
                 wb.close()
@@ -2064,6 +2730,16 @@ def apply_state_audit_decisions(
             ).value = agp or None
         if headers.get("PROTOCOLO") and write_element_data:
             ws.cell(item.excel_row, headers["PROTOCOLO"]).value = protocol or None
+        if is_flow20_odm:
+            secondary_column = headers.get("ESTADO SECUNDARIO")
+            odm_column = headers.get("ODM")
+            if not secondary_column or not odm_column:
+                wb.close()
+                raise BitacoraError(
+                    "La hoja Flujo 2.0 no contiene ESTADO SECUNDARIO y ODM."
+                )
+            ws.cell(item.excel_row, secondary_column).value = secondary_state
+            ws.cell(item.excel_row, odm_column).value = odm
 
         observation = ""
         if target_state in REJECTION_STATES:
@@ -2073,7 +2749,7 @@ def apply_state_audit_decisions(
 
         reported_pel = item.reported_pel
         reported_tratas = item.reported_tratas
-        if target_state in FINAL_ELEMENT_STATES | REJECTION_STATES:
+        if target_state in FINAL_ELEMENT_STATES | REJECTION_STATES or is_flow20_odm:
             if headers.get("CANTIDAD PEL"):
                 ws.cell(item.excel_row, headers["CANTIDAD PEL"]).value = None
             if headers.get("CANTIDAD TRATAS"):
@@ -2086,17 +2762,31 @@ def apply_state_audit_decisions(
                 item,
                 reported_state=target_state,
                 result=STATUS_AUDIT_CORRECTED,
+                reported_secondary_state=(
+                    secondary_state if is_flow20_odm else ""
+                ),
+                agp=agp if write_element_data else item.agp,
+                odm=odm if is_flow20_odm else item.odm,
                 protocol=protocol if write_element_data else item.protocol,
                 reported_pel=reported_pel,
                 reported_tratas=reported_tratas,
                 export_pel=None,
                 export_tratas=None,
-                count_result=COUNT_NOT_EVALUATED,
+                count_result=(
+                    COUNT_NOT_EVALUATED
+                    if requires_quantity_validation
+                    else COUNT_NOT_APPLICABLE
+                ),
                 pms_observation=observation,
                 observation_result=(
                     OBSERVATION_UPDATED
                     if observation
                     else OBSERVATION_NOT_APPLICABLE
+                ),
+                flow20_evidence=(
+                    "Estado, subestado y fechas confirmados por auditoría"
+                    if item.sheet == SHEET_FLOW20
+                    else item.flow20_evidence
                 ),
                 **timing_fields,
             )
@@ -2106,8 +2796,10 @@ def apply_state_audit_decisions(
                 **base_entry,
                 "Decisión": "Corregir",
                 "Estado final": target_state,
+                "Estado secundario": secondary_state if is_flow20_odm else "",
                 "AGP": agp if write_element_data else "",
                 "Protocolo": protocol if write_element_data else "",
+                "ODM": odm if is_flow20_odm else "",
                 "Detalle": (
                     "Devolución recuperada del PMS."
                     if observation
@@ -2271,7 +2963,7 @@ def apply_protocol_counts_to_validations(
                 )
             )
             continue
-        if item.reported_state not in FINAL_ELEMENT_STATES:
+        if not validation_requires_element_counts(item):
             updated.append(
                 replace(
                     item,
@@ -2844,10 +3536,15 @@ def _try_detect_header_row(ws, required_headers: set[str]) -> int | None:
         return None
 
 
-def _ensure_timing_columns(ws, *, header_row: int) -> dict[str, int]:
+def _ensure_named_timing_columns(
+    ws,
+    timing_headers: tuple[str, ...],
+    *,
+    header_row: int,
+) -> dict[str, int]:
     headers = _header_map(ws, header_row=header_row)
     style_column = headers.get("TOTAL ELEMENTOS") or max(headers.values(), default=1)
-    for header in TIMING_HEADERS:
+    for header in timing_headers:
         normalized = normalize_header(header)
         if normalized in headers:
             continue
@@ -2868,6 +3565,22 @@ def _ensure_timing_columns(ws, *, header_row: int) -> dict[str, int]:
         ws.column_dimensions[get_column_letter(target_column)].width = 22
         headers[normalized] = target_column
     return headers
+
+
+def _ensure_timing_columns(ws, *, header_row: int) -> dict[str, int]:
+    return _ensure_named_timing_columns(
+        ws,
+        TIMING_HEADERS,
+        header_row=header_row,
+    )
+
+
+def _ensure_flow20_timing_columns(ws, *, header_row: int) -> dict[str, int]:
+    return _ensure_named_timing_columns(
+        ws,
+        FLOW20_TIMING_HEADERS,
+        header_row=header_row,
+    )
 
 
 def _extend_coded_header_to_last_column(ws, last_column: int) -> None:
@@ -3009,13 +3722,21 @@ def _apply_cleaning_and_enrichment(
         )
         if header_row is None:
             continue
-        headers = _ensure_timing_columns(ws, header_row=header_row)
+        headers = (
+            _ensure_flow20_timing_columns(ws, header_row=header_row)
+            if sheet_name == SHEET_FLOW20
+            else _ensure_timing_columns(ws, header_row=header_row)
+        )
         pel_col = headers.get("CANTIDAD PEL")
         tratas_col = headers.get("CANTIDAD TRATAS")
         total_col = headers.get("TOTAL ELEMENTOS")
         observation_col = headers.get("OBSERVACIONES")
         arrival_col = headers.get(normalize_header(ARRIVAL_DATETIME_HEADER))
         exit_col = headers.get(normalize_header(EXIT_DATETIME_HEADER))
+        odm_datetime_col = headers.get(normalize_header(ODM_DATETIME_HEADER))
+        drawing_datetime_col = headers.get(
+            normalize_header(DRAWING_DATETIME_HEADER)
+        )
         for item in items:
             if (
                 (
@@ -3054,6 +3775,14 @@ def _apply_cleaning_and_enrichment(
                 exit_cell = ws.cell(item.excel_row, exit_col)
                 exit_cell.value = item.exit_datetime
                 exit_cell.number_format = EXCEL_DATETIME_FORMAT
+            if odm_datetime_col:
+                odm_cell = ws.cell(item.excel_row, odm_datetime_col)
+                odm_cell.value = item.odm_datetime
+                odm_cell.number_format = EXCEL_DATETIME_FORMAT
+            if drawing_datetime_col:
+                drawing_cell = ws.cell(item.excel_row, drawing_datetime_col)
+                drawing_cell.value = item.drawing_datetime
+                drawing_cell.number_format = EXCEL_DATETIME_FORMAT
 
     if email_quantities and "Correo-Rotulacion" in wb.sheetnames:
         ws = wb["Correo-Rotulacion"]
@@ -3112,11 +3841,19 @@ def _add_validation_result_sheet(wb, validations: list[ValidationRow]) -> None:
         "Resultado",
         "Profesional bitácora",
         "Profesional PMS",
+        "Estado secundario reportado",
         "Estado de llegada",
         "Fecha/hora de llegada",
         "Fecha/hora de salida",
+        "Fecha/hora entrega ODM",
+        "Fecha/hora entrega dibujo",
         "Resultado tiempos",
         "Fuente tiempos",
+        "Drawing Completed request",
+        "Estado actual request",
+        "Evidencia Flujo 2.0",
+        "AGP",
+        "ODM",
         "Protocolo",
         "Cantidad PEL reportada",
         "Cantidad TRATAS reportada",
@@ -3193,6 +3930,8 @@ def _add_validation_result_sheet(wb, validations: list[ValidationRow]) -> None:
             header_columns["FECHA/HORA ANTERIOR"],
             header_columns["FECHA/HORA DE LLEGADA"],
             header_columns["FECHA/HORA DE SALIDA"],
+            header_columns["FECHA/HORA ENTREGA ODM"],
+            header_columns["FECHA/HORA ENTREGA DIBUJO"],
         ):
             ws.cell(row, column).number_format = "yyyy-mm-dd hh:mm:ss"
         for column in (
@@ -3218,16 +3957,24 @@ def _add_validation_result_sheet(wb, validations: list[ValidationRow]) -> None:
         "L": 22,
         "M": 20,
         "N": 22,
-        "O": 34,
-        "P": 60,
-        "Q": 34,
-        "R": 24,
-        "S": 20,
-        "T": 22,
-        "U": 34,
+        "O": 22,
+        "P": 22,
+        "Q": 22,
+        "R": 30,
+        "S": 18,
+        "T": 20,
+        "U": 28,
         "V": 60,
         "W": 34,
-        "X": 20,
+        "X": 18,
+        "Y": 34,
+        "Z": 18,
+        "AA": 18,
+        "AB": 18,
+        "AC": 18,
+        "AD": 36,
+        "AE": 60,
+        "AF": 30,
     }
     for column, width in widths.items():
         ws.column_dimensions[column].width = width
@@ -3660,10 +4407,17 @@ def _copy_rows_into_template_sheet(
         )
     else:
         source_rows = []
-    if target_ws.title in {SHEET_NEW, SHEET_OLD}:
-        target_headers = _ensure_timing_columns(
-            target_ws,
-            header_row=TEMPLATE_HEADER_ROW,
+    if target_ws.title in {SHEET_NEW, SHEET_OLD, SHEET_FLOW20}:
+        target_headers = (
+            _ensure_flow20_timing_columns(
+                target_ws,
+                header_row=TEMPLATE_HEADER_ROW,
+            )
+            if target_ws.title == SHEET_FLOW20
+            else _ensure_timing_columns(
+                target_ws,
+                header_row=TEMPLATE_HEADER_ROW,
+            )
         )
         _extend_coded_header_to_last_column(
             target_ws,
@@ -3710,7 +4464,12 @@ def _copy_rows_into_template_sheet(
             if normalize_text(cell.value):
                 target_ws.row_dimensions[row].height = 72
 
-    for timing_header in TIMING_HEADERS:
+    sheet_timing_headers = (
+        FLOW20_TIMING_HEADERS
+        if target_ws.title == SHEET_FLOW20
+        else TIMING_HEADERS
+    )
+    for timing_header in sheet_timing_headers:
         timing_col = target_headers.get(normalize_header(timing_header))
         if timing_col:
             for row in range(TEMPLATE_HEADER_ROW + 1, last_row + 1):
@@ -3731,12 +4490,56 @@ def _copy_rows_into_template_sheet(
         actual_last_row,
         header_row=TEMPLATE_HEADER_ROW,
     )
-    if target_ws.title in {SHEET_NEW, SHEET_OLD}:
+    if target_ws.title in {SHEET_NEW, SHEET_OLD, SHEET_FLOW20}:
         from openpyxl.utils import get_column_letter
 
         target_ws.print_area = (
             f"A1:{get_column_letter(last_column)}{actual_last_row}"
         )
+
+
+def _ensure_flow20_template_sheet(wb) -> None:
+    if SHEET_FLOW20 in wb.sheetnames:
+        return
+    if SHEET_OLD not in wb.sheetnames:
+        raise BitacoraError(
+            "La plantilla F-AGP-04 no contiene una base para crear Flujo 2.0."
+        )
+    ws = wb.copy_worksheet(wb[SHEET_OLD])
+    ws.title = SHEET_FLOW20
+    headers = [
+        "ORIGEN DE ACTUALIZACIÓN",
+        "QR",
+        "ELEMENTOS ESTIMADOS",
+        "USUARIO",
+        "ESTADO DE LA OT",
+        "ESTADO SECUNDARIO",
+        "CÓDIGO DEL INCREMENTO (AGP)",
+        "PROTOCOLO",
+        "ODM",
+        "NÚMERO DE TICKET BLOQUEO (INC)",
+        "OBSERVACIONES",
+        "CANTIDAD PEL",
+        "CANTIDAD TRATAS",
+        "TOTAL ELEMENTOS",
+    ]
+    for table_name in list(ws.tables):
+        del ws.tables[table_name]
+    source_style_column = 13
+    for column, header in enumerate(headers, start=1):
+        if column > source_style_column:
+            _copy_cell_format(
+                ws.cell(TEMPLATE_HEADER_ROW, source_style_column),
+                ws.cell(TEMPLATE_HEADER_ROW, column),
+            )
+            _copy_cell_format(
+                ws.cell(TEMPLATE_HEADER_ROW + 1, source_style_column),
+                ws.cell(TEMPLATE_HEADER_ROW + 1, column),
+            )
+        ws.cell(TEMPLATE_HEADER_ROW, column).value = header
+    for column in range(len(headers) + 1, ws.max_column + 1):
+        ws.cell(TEMPLATE_HEADER_ROW, column).value = None
+        ws.cell(TEMPLATE_HEADER_ROW + 1, column).value = None
 
 
 def _build_from_coded_template(
@@ -3753,6 +4556,9 @@ def _build_from_coded_template(
     except Exception as exc:
         raise BitacoraError("No pude abrir la plantilla F-AGP-04.") from exc
 
+    if SHEET_FLOW20 in source_wb.sheetnames:
+        _ensure_flow20_template_sheet(wb)
+
     sheet_specs = {
         SHEET_NEW: ("Nuevo", "QR"),
         SHEET_OLD: ("Viejo", "QR"),
@@ -3760,6 +4566,8 @@ def _build_from_coded_template(
         "Correo-Rotulacion": ("Correos", "ASUNTO"),
         SHEET_PNC: ("Tabla4", "QR/ASUNTO"),
     }
+    if SHEET_FLOW20 in source_wb.sheetnames:
+        sheet_specs[SHEET_FLOW20] = ("Flujo20", "QR")
 
     missing_template_sheets = [
         sheet_name for sheet_name in sheet_specs if sheet_name not in wb.sheetnames
@@ -3828,9 +4636,12 @@ def build_upload_workbook(
     email_quantities = email_quantity_results or []
     _apply_cleaning_and_enrichment(wb, validations, email_quantities)
 
+    validation_sheet_names = [SHEET_NEW, SHEET_OLD]
+    if SHEET_FLOW20 in wb.sheetnames:
+        validation_sheet_names.append(SHEET_FLOW20)
     by_sheet = {
         sheet: [item for item in validations if item.sheet == sheet]
-        for sheet in (SHEET_NEW, SHEET_OLD)
+        for sheet in validation_sheet_names
     }
 
     table_specs = {
@@ -3840,8 +4651,10 @@ def build_upload_workbook(
         "Correo-Rotulacion": ("Correos", "ASUNTO"),
         SHEET_PNC: ("Tabla4", "QR/ASUNTO"),
     }
+    if SHEET_FLOW20 in wb.sheetnames:
+        table_specs[SHEET_FLOW20] = ("Flujo20", "QR")
 
-    for sheet_name in (SHEET_NEW, SHEET_OLD):
+    for sheet_name in validation_sheet_names:
         ws = wb[sheet_name]
         header_row = _detect_header_row(ws, {"QR", "ESTADO DE LA OT"})
         if matches_only:

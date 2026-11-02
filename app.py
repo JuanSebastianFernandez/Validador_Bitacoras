@@ -11,9 +11,14 @@ import streamlit as st
 from bitacora import (
     DRAWING_OUTPUT_STATES,
     FINAL_ELEMENT_STATES,
+    FLOW20_ODM_STATE,
+    FLOW20_SECONDARY_COMPLETED,
+    FLOW20_SECONDARY_PENDING,
+    FLOW20_STATES,
     LEGACY_STATES,
     NEW_STATES,
     REJECTION_STATES,
+    SHEET_FLOW20,
     SHEET_NEW,
     SHEET_OLD,
     STATUS_AUDIT_EXCLUDED,
@@ -43,13 +48,16 @@ from bitacora import (
     parse_audit_datetime,
     protocol_counts_with_audit_decisions,
     read_export_protocol_counts,
+    read_full_log_timelines,
     read_log_validation_data,
+    read_request_snapshots,
     require_log_date_coverage,
     split_protocols,
     replace_protocol_references,
     validate_rows,
     validation_audit_key,
     validation_frame,
+    validation_requires_element_counts,
 )
 
 
@@ -178,7 +186,7 @@ def protocol_issue_key(sheet: str, row: int, reference: str) -> str:
 def protocol_references(workbook_bytes: bytes, validations: list[Any]) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
     for item in validations:
-        if item.result == STATUS_AUDIT_EXCLUDED or item.reported_state not in FINAL_ELEMENT_STATES:
+        if item.result == STATUS_AUDIT_EXCLUDED or not validation_requires_element_counts(item):
             continue
         refs.append(
             {
@@ -259,6 +267,11 @@ def audit_state_stage(context: dict[str, Any]) -> None:
             f"Caso {cursor + 1} de {len(issues)} · {item.sheet} · fila {item.excel_row}",
             [
                 f"Bitácora: {item.reported_state or 'vacío'}",
+                (
+                    f"Estado secundario: {item.reported_secondary_state or 'sin dato'}"
+                    if item.sheet == SHEET_FLOW20
+                    else ""
+                ),
                 f"PMS del día: {item.pms_state or 'sin movimiento'}",
                 f"Profesional bitácora: {item.professional or 'sin dato'}",
                 f"Profesional del evento PMS: {item.pms_actor or 'sin dato'}",
@@ -266,6 +279,37 @@ def audit_state_stage(context: dict[str, Any]) -> None:
                 f"Resultado inicial: {item.result}",
                 f"Llegada propuesta: {item.arrival_datetime:%d/%m/%Y %H:%M:%S}" if item.arrival_datetime else "Llegada propuesta: sin dato",
                 f"Salida propuesta: {item.exit_datetime:%d/%m/%Y %H:%M:%S}" if item.exit_datetime else "Salida propuesta: sin dato",
+                (
+                    f"Entrega ODM propuesta: {item.odm_datetime:%d/%m/%Y %H:%M:%S}"
+                    if item.sheet == SHEET_FLOW20 and item.odm_datetime
+                    else "Entrega ODM propuesta: sin dato"
+                    if item.sheet == SHEET_FLOW20
+                    else ""
+                ),
+                (
+                    f"Entrega dibujo propuesta: {item.drawing_datetime:%d/%m/%Y %H:%M:%S}"
+                    if item.sheet == SHEET_FLOW20 and item.drawing_datetime
+                    else "Entrega dibujo propuesta: pendiente/sin dato"
+                    if item.sheet == SHEET_FLOW20
+                    else ""
+                ),
+                (
+                    "Drawing Completed (request): "
+                    + (
+                        "Sí"
+                        if item.request_drawing_completed is True
+                        else "No"
+                        if item.request_drawing_completed is False
+                        else "sin dato"
+                    )
+                    if item.sheet == SHEET_FLOW20
+                    else ""
+                ),
+                (
+                    f"Evidencia: {item.flow20_evidence or 'sin dato'}"
+                    if item.sheet == SHEET_FLOW20
+                    else ""
+                ),
                 f"Devolución del mismo estado: {item.pms_observation or 'sin observación'}",
             ],
         )
@@ -279,10 +323,18 @@ def audit_state_stage(context: dict[str, Any]) -> None:
             key=f"state_choice_{key}",
         )
         target_state = item.reported_state
+        secondary_state = item.reported_secondary_state
         agp = ""
         protocol = ""
+        odm = ""
         if choice == "Corregir":
-            state_options = sorted(NEW_STATES if item.sheet == SHEET_NEW else LEGACY_STATES)
+            state_options = sorted(
+                NEW_STATES
+                if item.sheet == SHEET_NEW
+                else FLOW20_STATES
+                if item.sheet == SHEET_FLOW20
+                else LEGACY_STATES
+            )
             default_state = saved.get("state") or item.pms_state or item.reported_state
             state_index = state_options.index(default_state) if default_state in state_options else 0
             target_state = st.selectbox(
@@ -291,29 +343,127 @@ def audit_state_stage(context: dict[str, Any]) -> None:
                 index=state_index,
                 key=f"state_target_{key}",
             )
-        needs_element_data = choice == "Corregir" and target_state in FINAL_ELEMENT_STATES
+        is_flow20_odm = item.sheet == SHEET_FLOW20 and target_state == FLOW20_ODM_STATE
+        if is_flow20_odm:
+            secondary_options = [
+                FLOW20_SECONDARY_PENDING,
+                FLOW20_SECONDARY_COMPLETED,
+            ]
+            default_secondary = (
+                saved.get("secondary_state")
+                or item.reported_secondary_state
+                or FLOW20_SECONDARY_PENDING
+            )
+            secondary_index = (
+                secondary_options.index(default_secondary)
+                if default_secondary in secondary_options
+                else 0
+            )
+            secondary_state = st.selectbox(
+                "Estado secundario",
+                secondary_options,
+                index=secondary_index,
+                help=(
+                    "Indica si se entregó únicamente la ODM o si también se "
+                    "finalizó el dibujo."
+                ),
+                key=f"state_secondary_{key}",
+            )
+        needs_element_data = (
+            choice == "Corregir"
+            and (target_state in FINAL_ELEMENT_STATES or is_flow20_odm)
+        )
         if needs_element_data:
-            columns = st.columns(2)
+            columns = st.columns(3 if is_flow20_odm else 2)
             agp = columns[0].text_input(
                 "Código(s) AGP, separados por ;",
-                value=str(saved.get("agp") or ""),
-                help="Obligatorio para dibujo finalizado. Si hay varios, usa ;.",
+                value=str(saved.get("agp") or item.agp or ""),
+                help="Obligatorio. Si hay varios, usa ;.",
                 key=f"state_agp_{key}",
             )
             protocol = columns[1].text_input(
                 "Protocolo(s), separados por ;",
                 value=str(saved.get("protocol") or item.protocol or ""),
-                help="Obligatorio para dibujo finalizado. Si hay varios, usa ;.",
+                help="Obligatorio. Si hay varios, usa ;.",
                 key=f"state_protocol_{key}",
             )
+            if is_flow20_odm:
+                odm = columns[2].text_input(
+                    "ODM",
+                    value=str(saved.get("odm") or item.odm or ""),
+                    help="La entrega en estado 3 debe llevar una ODM.",
+                    key=f"state_odm_{key}",
+                )
         elif choice == "Corregir" and target_state in REJECTION_STATES:
             st.info(
                 "Es una devolución: no se solicita AGP ni protocolo. "
                 "La observación se recuperará automáticamente del PMS."
             )
-        needs_timing_data = choice != "Excluir" and target_state in DRAWING_OUTPUT_STATES
+        needs_flow20_timing = choice != "Excluir" and is_flow20_odm
+        needs_timing_data = (
+            choice != "Excluir"
+            and not needs_flow20_timing
+            and target_state in DRAWING_OUTPUT_STATES
+        )
         arrival_datetime = ""
         exit_datetime = ""
+        odm_datetime = ""
+        drawing_datetime = ""
+        if needs_flow20_timing:
+            timing_columns = st.columns(3)
+            arrival_default = (
+                str(saved.get("arrival_datetime") or "")
+                or (
+                    item.arrival_datetime.strftime("%d/%m/%Y %H:%M:%S")
+                    if item.arrival_datetime
+                    else ""
+                )
+            )
+            odm_default = (
+                str(saved.get("odm_datetime") or "")
+                or (
+                    item.odm_datetime.strftime("%d/%m/%Y %H:%M:%S")
+                    if item.odm_datetime
+                    else ""
+                )
+            )
+            drawing_default = (
+                str(saved.get("drawing_datetime") or "")
+                or (
+                    item.drawing_datetime.strftime("%d/%m/%Y %H:%M:%S")
+                    if item.drawing_datetime
+                    else ""
+                )
+            )
+            if secondary_state == FLOW20_SECONDARY_PENDING:
+                drawing_default = ""
+            arrival_datetime = timing_columns[0].text_input(
+                "Fecha/hora de llegada a dibujo",
+                value=arrival_default,
+                placeholder="DD/MM/AAAA HH:MM:SS",
+                key=f"state_arrival_{key}",
+            )
+            odm_datetime = timing_columns[1].text_input(
+                "Fecha/hora entrega ODM",
+                value=odm_default,
+                placeholder="DD/MM/AAAA HH:MM:SS",
+                key=f"state_odm_datetime_{key}",
+            )
+            drawing_datetime = timing_columns[2].text_input(
+                "Fecha/hora entrega dibujo",
+                value=drawing_default,
+                placeholder=(
+                    "DD/MM/AAAA HH:MM:SS"
+                    if secondary_state == FLOW20_SECONDARY_COMPLETED
+                    else "Déjalo vacío: dibujo pendiente"
+                ),
+                disabled=secondary_state == FLOW20_SECONDARY_PENDING,
+                key=f"state_drawing_datetime_{key}_{secondary_state}",
+            )
+            st.caption(
+                "Flujo 2.0 conserva por separado la llegada, la entrega de la ODM "
+                "y la entrega del dibujo."
+            )
         if needs_timing_data:
             timing_columns = st.columns(2)
             arrival_default = (
@@ -361,7 +511,35 @@ def audit_state_stage(context: dict[str, Any]) -> None:
         )
         if save:
             timing_error = ""
-            if needs_timing_data:
+            if needs_flow20_timing:
+                try:
+                    parsed_arrival = parse_audit_datetime(arrival_datetime)
+                    parsed_odm = parse_audit_datetime(odm_datetime)
+                    parsed_drawing = parse_audit_datetime(drawing_datetime)
+                    if not parsed_arrival or not parsed_odm:
+                        timing_error = (
+                            "Debes confirmar la llegada y la fecha/hora de entrega de la ODM."
+                        )
+                    elif parsed_arrival > parsed_odm:
+                        timing_error = (
+                            "La llegada no puede ser posterior a la entrega de la ODM."
+                        )
+                    elif secondary_state == FLOW20_SECONDARY_COMPLETED:
+                        if not parsed_drawing:
+                            timing_error = (
+                                "Si el dibujo quedó finalizado debes confirmar su fecha/hora."
+                            )
+                        elif parsed_drawing < parsed_odm:
+                            timing_error = (
+                                "La entrega del dibujo no puede ser anterior a la ODM."
+                            )
+                    elif parsed_drawing:
+                        timing_error = (
+                            "Un caso pendiente de dibujo no debe tener fecha de entrega del dibujo."
+                        )
+                except BitacoraError as exc:
+                    timing_error = str(exc)
+            elif needs_timing_data:
                 try:
                     parsed_arrival = parse_audit_datetime(arrival_datetime)
                     parsed_exit = parse_audit_datetime(exit_datetime)
@@ -373,8 +551,15 @@ def audit_state_stage(context: dict[str, Any]) -> None:
                     timing_error = str(exc)
             if timing_error:
                 st.error(timing_error)
-            elif needs_element_data and (not agp.strip() or not protocol.strip()):
-                st.error("Para corregir a dibujo finalizado debes indicar AGP y protocolo.")
+            elif needs_element_data and (
+                not agp.strip()
+                or not protocol.strip()
+                or is_flow20_odm and not odm.strip()
+            ):
+                st.error(
+                    "Para corregir este caso debes indicar AGP, protocolo"
+                    + (" y ODM." if is_flow20_odm else ".")
+                )
             elif needs_element_data and has_invalid_agp_separator(agp):
                 st.error("Cuando haya varios AGP, sepáralos únicamente con ;.")
             elif needs_element_data and has_invalid_protocol_separator(protocol):
@@ -386,10 +571,14 @@ def audit_state_stage(context: dict[str, Any]) -> None:
                 decisions[key] = {
                     "action": action,
                     "state": target_state,
+                    "secondary_state": secondary_state,
                     "agp": agp.strip(),
                     "protocol": protocol.strip(),
+                    "odm": odm.strip(),
                     "arrival_datetime": arrival_datetime.strip(),
                     "exit_datetime": exit_datetime.strip(),
+                    "odm_datetime": odm_datetime.strip(),
+                    "drawing_datetime": drawing_datetime.strip(),
                     "detail": detail.strip(),
                 }
                 context["state_decisions"] = decisions
@@ -426,7 +615,10 @@ def audit_state_stage(context: dict[str, Any]) -> None:
             context.get("timelines", {}),
             context["production_date"],
         )
-        context["audit_entries"] = entries
+        context["audit_entries"] = [
+            *context.get("audit_entries", []),
+            *entries,
+        ]
         st.session_state.audit_step = 2
         st.rerun()
 
@@ -1169,7 +1361,20 @@ def audit_final_stage(context: dict[str, Any]) -> None:
             "Cantidad PEL reportada", "Cantidad TRATAS reportada",
             "Cantidad PEL EXPORT", "Cantidad TRATAS EXPORT", "Resultado cantidades",
         ]
-        flow = frame[frame["Estado reportado"].isin(FINAL_ELEMENT_STATES)][quantity_columns]
+        quantity_keys = {
+            (item.sheet, item.excel_row, item.qr)
+            for item in validations
+            if validation_requires_element_counts(item)
+        }
+        flow_mask = frame.apply(
+            lambda row: (
+                row["Hoja"],
+                int(row["Fila Excel"]),
+                row["QR"],
+            ) in quantity_keys,
+            axis=1,
+        )
+        flow = frame.loc[flow_mask, quantity_columns]
         email = email_quantity_frame(email_results)[quantity_columns]
         st.dataframe(pd.concat([flow, email], ignore_index=True), use_container_width=True, hide_index=True)
     with tabs[2]:
@@ -1214,8 +1419,17 @@ with st.sidebar:
         disabled=context is not None,
         help="Debe cubrir la fecha indicada en el nombre de la bitácora.",
     )
+    request_file = st.file_uploader(
+        "3. Exported Request del PMS",
+        type=["csv"],
+        disabled=context is not None,
+        help=(
+            "Se exige cuando la bitácora contiene Flujo 2.0. Permite validar "
+            "la marca Contract Drawing Completed."
+        ),
+    )
     export_file = st.file_uploader(
-        "3. EXPORT de SAP",
+        "4. EXPORT de SAP",
         type=["xlsx"],
         disabled=current_step != 3,
         help="Se habilita únicamente durante la etapa 3, después de depurar los protocolos.",
@@ -1243,13 +1457,26 @@ if start:
     try:
         production_date = parse_production_date(workbook_file.name)
         workbook_bytes, rows = extract_workbook_rows(workbook_file.getvalue())
+        flow20_rows = [row for row in rows if row["sheet"] == SHEET_FLOW20]
+        if flow20_rows and request_file is None:
+            raise BitacoraError(
+                "Esta bitácora contiene Flujo 2.0. Carga también el archivo "
+                "exported-request.csv para validar Drawing Completed."
+            )
         qrs = {row["qr"] for row in rows if row["qr"]}
         allowed_states_by_qr: dict[str, set[str]] = {}
         for row in rows:
             if not row["qr"]:
                 continue
-            states = NEW_STATES if row["sheet"] == SHEET_NEW else LEGACY_STATES
+            states = (
+                NEW_STATES
+                if row["sheet"] == SHEET_NEW
+                else FLOW20_STATES
+                if row["sheet"] == SHEET_FLOW20
+                else LEGACY_STATES
+            )
             allowed_states_by_qr.setdefault(row["qr"], set()).update(states)
+        log_bytes = log_file.getvalue()
         (
             latest_on_day,
             latest_as_of,
@@ -1259,7 +1486,7 @@ if start:
             timelines,
             qr_aliases,
         ) = read_log_validation_data(
-            log_file.getvalue(),
+            log_bytes,
             qrs,
             production_date,
             allowed_states_by_qr=allowed_states_by_qr,
@@ -1273,6 +1500,20 @@ if start:
             rows,
             qr_aliases,
         )
+        flow20_qrs = {
+            row["qr"]
+            for row in rows
+            if row["sheet"] == SHEET_FLOW20 and row["qr"]
+        }
+        request_snapshots = (
+            read_request_snapshots(request_file.getvalue(), flow20_qrs)
+            if flow20_qrs and request_file is not None
+            else {}
+        )
+        if flow20_qrs:
+            full_flow20_timelines = read_full_log_timelines(log_bytes, flow20_qrs)
+            for qr in flow20_qrs:
+                timelines[qr] = full_flow20_timelines.get(qr, [])
         validations = validate_rows(
             rows,
             latest_on_day,
@@ -1280,6 +1521,7 @@ if start:
             rejection_comments=rejection_comments,
             timelines=timelines,
             production_date=production_date,
+            request_snapshots=request_snapshots,
         )
         st.session_state.audit_context = {
             "production_date": production_date,
@@ -1290,6 +1532,7 @@ if start:
             "latest_as_of": latest_as_of,
             "rejection_comments": rejection_comments,
             "timelines": timelines,
+            "request_snapshots": request_snapshots,
             "qr_aliases": qr_aliases,
             "coverage": coverage,
             "unreported_cases": unreported_cases,
@@ -1308,8 +1551,8 @@ if start:
 context = current_context()
 if context is None:
     st.info(
-        "Carga la bitácora y el log para comenzar. El EXPORT no se necesita todavía: "
-        "el sistema te entregará primero el listado exacto de protocolos."
+        "Carga la bitácora y el log para comenzar. Si contiene Flujo 2.0, agrega "
+        "también exported-request. El EXPORT de SAP se solicitará en la etapa 3."
     )
     st.stop()
 

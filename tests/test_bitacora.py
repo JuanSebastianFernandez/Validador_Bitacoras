@@ -18,6 +18,13 @@ from bitacora import (
     COUNT_INVALID_PROTOCOL_SEPARATOR,
     COUNT_PROTOCOLS_INCOMPLETE,
     COUNT_UPDATED,
+    DRAWING_DATETIME_HEADER,
+    FLOW20_ODM_STATE,
+    FLOW20_SECONDARY_COMPLETED,
+    FLOW20_SECONDARY_PENDING,
+    ODM_DATETIME_HEADER,
+    RequestSnapshot,
+    SHEET_FLOW20,
     LogCoverage,
     LogState,
     OBSERVATION_UPDATED,
@@ -25,6 +32,7 @@ from bitacora import (
     STATUS_AUDIT_CORRECTED,
     STATUS_AUDIT_EXCLUDED,
     STATUS_AUDIT_KEEP,
+    STATUS_FLOW20_AMBIGUOUS,
     STATUS_MATCH,
     STATUS_MISMATCH,
     STATUS_NO_EVENT,
@@ -35,6 +43,7 @@ from bitacora import (
     apply_qr_alias_corrections,
     apply_protocol_audit_decisions,
     apply_protocol_audit_results,
+    apply_protocol_counts_to_validations,
     apply_state_audit_decisions,
     build_upload_workbook,
     build_protocol_inventory_workbook,
@@ -50,7 +59,9 @@ from bitacora import (
     protocol_counts_with_audit_decisions,
     protocol_quantity_breakdown,
     read_export_protocol_counts,
+    read_full_log_timelines,
     read_log_validation_data,
+    read_request_snapshots,
     read_log_states_with_coverage,
     read_latest_log_states,
     require_log_date_coverage,
@@ -116,6 +127,55 @@ def make_workbook() -> bytes:
     ws_old.add_table(Table(displayName="Viejo", ref="A1:Q2"))
     output = BytesIO()
     wb.save(output)
+    return output.getvalue()
+
+
+def make_flow20_workbook(
+    *,
+    secondary: str = FLOW20_SECONDARY_COMPLETED,
+    professional: str = "Manuel Fernando Sanchez Mondragon",
+) -> bytes:
+    wb = load_workbook(BytesIO(make_workbook()), data_only=False)
+    ws = wb.create_sheet(SHEET_FLOW20)
+    ws.append(
+        [
+            "ORIGEN DE ACTUALIZACIÓN",
+            "QR",
+            "ELEMENTOS ESTIMADOS",
+            "USUARIO",
+            "ESTADO DE LA OT",
+            "ESTADO SECUNDARIO",
+            "CÓDIGO DEL INCREMENTO (AGP)",
+            "PROTOCOLO",
+            "ODM",
+            "NÚMERO DE TICKET BLOQUEO (INC)",
+            "OBSERVACIONES",
+            "CANTIDAD PEL",
+            "CANTIDAD TRATAS",
+            "TOTAL ELEMENTOS",
+        ]
+    )
+    ws.append(
+        [
+            "PQRs",
+            "QR-20",
+            3,
+            professional,
+            FLOW20_ODM_STATE,
+            secondary,
+            "2000140001",
+            "1000147997",
+            "ODM-20",
+            None,
+            None,
+            None,
+            None,
+            None,
+        ]
+    )
+    output = BytesIO()
+    wb.save(output)
+    wb.close()
     return output.getvalue()
 
 
@@ -1338,11 +1398,11 @@ def test_export_counts_and_rejection_observation_are_applied():
     assert ws_new["J3"].value == "Corregir rotulación"
 
     ws_result = wb["Resultado Validacion"]
-    assert ws_result["T2"].value == 6
-    assert ws_result["U2"].value == 2
-    assert ws_result["V2"].value == COUNT_UPDATED
-    assert ws_result["W3"].value == "Corregir rotulación"
-    assert ws_result["X3"].value == OBSERVATION_UPDATED
+    assert ws_result["AB2"].value == 6
+    assert ws_result["AC2"].value == 2
+    assert ws_result["AD2"].value == COUNT_UPDATED
+    assert ws_result["AE3"].value == "Corregir rotulación"
+    assert ws_result["AF3"].value == OBSERVATION_UPDATED
 
 
 def test_validation_and_strict_output_structure():
@@ -1415,11 +1475,19 @@ def test_validation_and_strict_output_structure():
         "Resultado",
         "Profesional bitácora",
         "Profesional PMS",
+        "Estado secundario reportado",
         "Estado de llegada",
         "Fecha/hora de llegada",
         "Fecha/hora de salida",
+        "Fecha/hora entrega ODM",
+        "Fecha/hora entrega dibujo",
         "Resultado tiempos",
         "Fuente tiempos",
+        "Drawing Completed request",
+        "Estado actual request",
+        "Evidencia Flujo 2.0",
+        "AGP",
+        "ODM",
         "Protocolo",
         "Cantidad PEL reportada",
         "Cantidad TRATAS reportada",
@@ -1430,7 +1498,7 @@ def test_validation_and_strict_output_structure():
         "Acción observación",
     ]
     assert ws_result.max_row == 4
-    assert ws_result.tables["ResultadoValidacion"].ref == "A1:X4"
+    assert ws_result.tables["ResultadoValidacion"].ref == "A1:AF4"
     assert ws_result["C2"].value == "QR-N"
     assert ws_result["I2"].value == STATUS_MATCH
     assert ws_result["C3"].value == "QR-X"
@@ -1552,8 +1620,8 @@ def test_coded_output_writes_typed_arrival_and_exit_datetimes():
     assert ws["M6"].number_format == "dd/mm/yyyy hh:mm:ss"
     assert ws["N6"].number_format == "dd/mm/yyyy hh:mm:ss"
     result = wb["Resultado Validacion"]
-    assert result["M2"].value == datetime(2026, 6, 18, 8, 0)
-    assert result["N2"].value == datetime(2026, 6, 18, 10, 0)
+    assert result["N2"].value == datetime(2026, 6, 18, 8, 0)
+    assert result["O2"].value == datetime(2026, 6, 18, 10, 0)
 
 def test_operational_noise_is_removed_from_all_five_sheets_without_touching_formulas():
     source_wb = load_workbook(BytesIO(make_workbook()), data_only=False)
@@ -1953,3 +2021,300 @@ def test_email_quantities_only_update_solicitud_por_correo_rows():
     )
     assert (ws_result["G4"].value, ws_result["H4"].value) == (2, 1)
     assert ws_result["I5"].value == COUNT_INVALID_PROTOCOL_SEPARATOR
+
+
+def test_request_snapshot_reader_parses_flow20_flags_and_metadata():
+    request = StringIO(
+        "request_code;contract_drawing_completed;status;new_fulfillment_process;"
+        "date_created;odm;agp_project;agp_increment;protocol\n"
+        "QR-20;true;3-ODM Asignadas;true;2026-10-29 11:00:00;ODM-20;AGP-20;;1000147997\n"
+        "QR-OTHER;false;2.6-Dibujante asignado;true;2026-10-29 11:00:00;;;;\n"
+    )
+
+    snapshots = read_request_snapshots(request, {"QR-20"}, chunksize=1)
+
+    assert set(snapshots) == {"QR-20"}
+    snapshot = snapshots["QR-20"]
+    assert snapshot.drawing_completed is True
+    assert snapshot.new_fulfillment_process is True
+    assert snapshot.status == FLOW20_ODM_STATE
+    assert snapshot.odm == "ODM-20"
+    assert snapshot.agp == "AGP-20"
+    assert snapshot.protocol == "1000147997"
+
+
+def test_flow20_simultaneous_odm_and_drawing_are_validated_and_exported():
+    workbook = make_flow20_workbook()
+    _, rows = extract_workbook_rows(workbook)
+    log = StringIO(
+        "request_code;initial_state;final_state;date_created;username;user_created_last_name;comments\n"
+        "QR-20;0-Por Valorizar;2-Valorizado;2026-10-29 07:00:00;;Sistema;\n"
+        "QR-20;2-Valorizado;2.5-Enviado a dibujo;2026-10-29 08:00:00;;Sistema;\n"
+        "QR-20;2.5-Enviado a dibujo;2.6-Dibujante asignado;2026-10-29 09:00:00;;Sistema;Drawing Assignment\n"
+        "QR-20;2.6-Dibujante asignado;3-ODM Asignadas;2026-10-29 10:00:00;"
+        "CO1049796769;Sanchez Mondragon.Manuel Fernando;OK\n"
+    )
+    on_day, as_of, _, _, timelines = read_log_validation_data(
+        log,
+        {"QR-20"},
+        date(2026, 10, 29),
+        include_timelines=True,
+    )
+    snapshot = RequestSnapshot(
+        qr="QR-20",
+        drawing_completed=True,
+        status=FLOW20_ODM_STATE,
+        new_fulfillment_process=True,
+    )
+    validations = validate_rows(
+        rows,
+        on_day,
+        as_of,
+        timelines=timelines,
+        production_date=date(2026, 10, 29),
+        request_snapshots={"QR-20": snapshot},
+    )
+    item = next(row for row in validations if row.sheet == SHEET_FLOW20)
+
+    assert item.result == STATUS_MATCH
+    assert item.arrival_datetime == datetime(2026, 10, 29, 8, 0)
+    assert item.odm_datetime == datetime(2026, 10, 29, 10, 0)
+    assert item.drawing_datetime == datetime(2026, 10, 29, 10, 0)
+
+    counted = apply_protocol_counts_to_validations(
+        validations,
+        {
+            "1000147997": ProtocolElementCounts(
+                pel_ids=frozenset({"P-1", "P-2"}),
+                tratta_ids=frozenset({"T-1"}),
+            )
+        },
+    )
+    output = build_upload_workbook(
+        workbook,
+        counted,
+        matches_only=True,
+        template_bytes=make_template_workbook(),
+    )
+    wb = load_workbook(BytesIO(output), data_only=False)
+    ws = wb[SHEET_FLOW20]
+    assert ws.tables["Flujo20"].ref == "A5:Q6"
+    assert ws["F6"].value == FLOW20_SECONDARY_COMPLETED
+    assert (ws["L6"].value, ws["M6"].value) == (2, 1)
+    assert ws["N6"].value == '=IF(COUNTA(L6:M6)=0,"",SUM(L6:M6))'
+    assert ws["O6"].value == datetime(2026, 10, 29, 8, 0)
+    assert ws["P6"].value == datetime(2026, 10, 29, 10, 0)
+    assert ws["Q6"].value == datetime(2026, 10, 29, 10, 0)
+    assert [cell.value for cell in ws[5]][-3:] == [
+        "FECHA/HORA DE LLEGADA",
+        ODM_DATETIME_HEADER,
+        DRAWING_DATETIME_HEADER,
+    ]
+    wb.close()
+
+
+def test_flow20_staggered_drawing_uses_same_professional_repeat_only():
+    workbook = make_flow20_workbook()
+    _, rows = extract_workbook_rows(workbook)
+    base = (
+        "request_code;initial_state;final_state;date_created;username;user_created_last_name;comments\n"
+        "QR-20;0-Por Valorizar;2-Valorizado;2026-10-28 07:00:00;;Sistema;\n"
+        "QR-20;2-Valorizado;2.5-Enviado a dibujo;2026-10-28 08:00:00;;Sistema;\n"
+        "QR-20;2.5-Enviado a dibujo;2.6-Dibujante asignado;2026-10-28 09:00:00;;Sistema;Drawing Assignment\n"
+        "QR-20;2.6-Dibujante asignado;3-ODM Asignadas;2026-10-28 10:00:00;"
+        "CO1049796769;Sanchez Mondragon.Manuel Fernando;OK\n"
+    )
+    valid_repeat = (
+        "QR-20;3-ODM Asignadas;3-ODM Asignadas;2026-10-29 11:00:00;"
+        "CO1049796769;Sanchez Mondragon.Manuel Fernando;URL dibujo\n"
+    )
+    on_day, as_of, _, _, timelines = read_log_validation_data(
+        StringIO(base + valid_repeat),
+        {"QR-20"},
+        date(2026, 10, 29),
+        include_timelines=True,
+    )
+    snapshot = RequestSnapshot(
+        qr="QR-20",
+        drawing_completed=True,
+        new_fulfillment_process=True,
+    )
+    item = next(
+        row
+        for row in validate_rows(
+            rows,
+            on_day,
+            as_of,
+            timelines=timelines,
+            production_date=date(2026, 10, 29),
+            request_snapshots={"QR-20": snapshot},
+        )
+        if row.sheet == SHEET_FLOW20
+    )
+    assert item.result == STATUS_MATCH
+    assert item.odm_datetime == datetime(2026, 10, 28, 10, 0)
+    assert item.drawing_datetime == datetime(2026, 10, 29, 11, 0)
+
+    technical_repeat = (
+        "QR-20;3-ODM Asignadas;3-ODM Asignadas;2026-10-29 11:00:00;"
+        "CO999;Otro.Usuario;Drawing Reassignment\n"
+    )
+    on_day, as_of, _, _, timelines = read_log_validation_data(
+        StringIO(base + technical_repeat),
+        {"QR-20"},
+        date(2026, 10, 29),
+        include_timelines=True,
+    )
+    item = next(
+        row
+        for row in validate_rows(
+            rows,
+            on_day,
+            as_of,
+            timelines=timelines,
+            production_date=date(2026, 10, 29),
+            request_snapshots={"QR-20": snapshot},
+        )
+        if row.sheet == SHEET_FLOW20
+    )
+    assert item.result == STATUS_FLOW20_AMBIGUOUS
+    assert item.drawing_datetime is None
+
+
+def test_flow20_direct_valorized_to_odm_uses_valorized_as_arrival():
+    workbook = make_flow20_workbook()
+    _, rows = extract_workbook_rows(workbook)
+    log = StringIO(
+        "request_code;initial_state;final_state;date_created;username;user_created_last_name;comments\n"
+        "QR-20;0-Por Valorizar;2-Valorizado;2026-10-29 08:00:00;;Sistema;\n"
+        "QR-20;2-Valorizado;3-ODM Asignadas;2026-10-29 10:00:00;"
+        "CO1049796769;Sanchez Mondragon.Manuel Fernando;OK\n"
+    )
+    on_day, as_of, _, _, timelines = read_log_validation_data(
+        log,
+        {"QR-20"},
+        date(2026, 10, 29),
+        include_timelines=True,
+    )
+    item = next(
+        row
+        for row in validate_rows(
+            rows,
+            on_day,
+            as_of,
+            timelines=timelines,
+            production_date=date(2026, 10, 29),
+            request_snapshots={
+                "QR-20": RequestSnapshot(
+                    qr="QR-20",
+                    drawing_completed=True,
+                    new_fulfillment_process=True,
+                )
+            },
+        )
+        if row.sheet == SHEET_FLOW20
+    )
+    assert item.result == STATUS_MATCH
+    assert item.arrival_state == "2-Valorizado"
+    assert item.arrival_datetime == datetime(2026, 10, 29, 8, 0)
+
+
+def test_flow20_ambiguous_times_can_be_confirmed_once_in_state_audit():
+    workbook = make_flow20_workbook()
+    _, rows = extract_workbook_rows(workbook)
+    log_text = (
+        "request_code;initial_state;final_state;date_created;username;user_created_last_name;comments\n"
+        "QR-20;0-Por Valorizar;2-Valorizado;2026-10-28 07:00:00;;Sistema;\n"
+        "QR-20;2-Valorizado;2.5-Enviado a dibujo;2026-10-28 08:00:00;;Sistema;\n"
+        "QR-20;2.5-Enviado a dibujo;2.6-Dibujante asignado;2026-10-28 09:00:00;;Sistema;\n"
+        "QR-20;2.6-Dibujante asignado;3-ODM Asignadas;2026-10-28 10:00:00;"
+        "CO1049796769;Sanchez Mondragon.Manuel Fernando;OK\n"
+    )
+    on_day, as_of, _, _, timelines = read_log_validation_data(
+        StringIO(log_text),
+        {"QR-20"},
+        date(2026, 10, 29),
+        include_timelines=True,
+    )
+    validations = validate_rows(
+        rows,
+        on_day,
+        as_of,
+        timelines=timelines,
+        production_date=date(2026, 10, 29),
+        request_snapshots={
+            "QR-20": RequestSnapshot(
+                qr="QR-20",
+                drawing_completed=True,
+                new_fulfillment_process=True,
+            )
+        },
+    )
+    item = next(row for row in validations if row.sheet == SHEET_FLOW20)
+    assert item.result == STATUS_FLOW20_AMBIGUOUS
+    decision = {
+        validation_audit_key(item): {
+            "action": "keep",
+            "secondary_state": FLOW20_SECONDARY_COMPLETED,
+            "arrival_datetime": "28/10/2026 08:00:00",
+            "odm_datetime": "28/10/2026 10:00:00",
+            "drawing_datetime": "29/10/2026 11:00:00",
+        }
+    }
+
+    _, updated, audit = apply_state_audit_decisions(
+        workbook,
+        validations,
+        on_day,
+        decision,
+        timelines=timelines,
+        production_date=date(2026, 10, 29),
+    )
+    updated_item = next(row for row in updated if row.sheet == SHEET_FLOW20)
+    assert updated_item.result == STATUS_AUDIT_KEEP
+    assert updated_item.arrival_datetime == datetime(2026, 10, 28, 8, 0)
+    assert updated_item.odm_datetime == datetime(2026, 10, 28, 10, 0)
+    assert updated_item.drawing_datetime == datetime(2026, 10, 29, 11, 0)
+    assert audit[0]["Fecha/hora entrega ODM"] == "28/10/2026 10:00:00"
+
+
+def test_flow20_pending_accepts_a_drawing_repeat_after_the_cutoff():
+    workbook = make_flow20_workbook(secondary=FLOW20_SECONDARY_PENDING)
+    _, rows = extract_workbook_rows(workbook)
+    log_text = (
+        "request_code;initial_state;final_state;date_created;username;user_created_last_name;comments\n"
+        "QR-20;0-Por Valorizar;2-Valorizado;2026-10-29 07:00:00;;Sistema;\n"
+        "QR-20;2-Valorizado;2.5-Enviado a dibujo;2026-10-29 08:00:00;;Sistema;\n"
+        "QR-20;2.5-Enviado a dibujo;2.6-Dibujante asignado;2026-10-29 09:00:00;;Sistema;\n"
+        "QR-20;2.6-Dibujante asignado;3-ODM Asignadas;2026-10-29 10:00:00;"
+        "CO1049796769;Sanchez Mondragon.Manuel Fernando;OK\n"
+        "QR-20;3-ODM Asignadas;3-ODM Asignadas;2026-10-30 11:00:00;"
+        "CO1049796769;Sanchez Mondragon.Manuel Fernando;URL dibujo\n"
+    )
+    on_day, as_of, _, _, timelines = read_log_validation_data(
+        StringIO(log_text),
+        {"QR-20"},
+        date(2026, 10, 29),
+        include_timelines=True,
+    )
+    timelines = read_full_log_timelines(StringIO(log_text), {"QR-20"})
+    snapshot = RequestSnapshot(
+        qr="QR-20",
+        drawing_completed=True,
+        new_fulfillment_process=True,
+    )
+    item = next(
+        row
+        for row in validate_rows(
+            rows,
+            on_day,
+            as_of,
+            timelines=timelines,
+            production_date=date(2026, 10, 29),
+            request_snapshots={"QR-20": snapshot},
+        )
+        if row.sheet == SHEET_FLOW20
+    )
+    assert item.result == STATUS_MATCH
+    assert item.odm_datetime == datetime(2026, 10, 29, 10, 0)
+    assert item.drawing_datetime is None

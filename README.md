@@ -1,12 +1,18 @@
 # RevisaBitacoras
 
-Aplicación Streamlit para validar y completar las hojas **Flujo Nuevo** y
-**Flujo Viejo** de la bitácora diaria. Usa el `exported-logs.csv` del PMS para
-estados y devoluciones, y el `EXPORT_*.xlsx` de SAP para las cantidades P/TRATAS.
+Aplicación Streamlit para validar y completar las hojas **Flujo Nuevo**,
+**Flujo Viejo** y **Flujo 2.0** de la bitácora diaria. Usa el
+`exported-logs.csv` del PMS para estados y devoluciones, el
+`exported-request.csv` para confirmar `Contract Drawing Completed` en Flujo 2.0
+y el `EXPORT_*.xlsx` de SAP para las cantidades P/TRATAS.
 El archivo final se devuelve codificado con la plantilla HSEQ/SIG **F-AGP-04**,
 incluida en `assets/` para que funcione tanto localmente como en Streamlit Cloud.
 La hoja `PNC` se conserva como registro operativo, se limpia y se traslada a la
 plantilla codificada sin validaciones adicionales por ahora.
+
+La explicación funcional completa —incluida la reconstrucción detallada de los
+ciclos para obtener fecha/hora de llegada y salida— está en
+[`MANUAL_FUNCIONAL_REVISOR_BITACORAS.md`](MANUAL_FUNCIONAL_REVISOR_BITACORAS.md).
 
 ## Flujo de auditoría guiada
 
@@ -19,7 +25,8 @@ antes de avanzar:
    protocolo y recuperan automáticamente el comentario del PMS. AGP y protocolo se
    solicitan al corregir a un estado de dibujo finalizado. Para toda salida de dibujo
    que pase por auditoría se muestran y confirman también la fecha/hora de llegada y
-   de salida.
+   de salida. En `Flujo 2.0` se auditan por separado llegada, entrega de ODM y
+   entrega de dibujo, junto con el estado secundario.
 2. **Casos no reportados:** permite agregar cada hallazgo a `Flujo Nuevo` o
    `Flujo Viejo`, o justificar por qué no debe agregarse. Pide AGP y protocolo,
    pero deja el conteo P/TRATA para la etapa siguiente. Si el hallazgo es una
@@ -53,6 +60,12 @@ antes de avanzar:
    `2-Valorizado`/`2.6.1-Dibujo en revision`/`2.7-Dibujo finalizado` para flujo viejo.
    Las filas técnicas duplicadas y las actualizaciones sin cambio de estado se
    ignoran. `1.3-RG Gestionado EEC` nunca se considera salida de dibujo.
+   En `Flujo 2.0`, la entrega de ODM es el cambio desde `2-Valorizado` o
+   `2.6-Dibujante asignado` hacia `3-ODM Asignadas`. El dibujo se reconoce por una
+   repetición posterior del estado vigente hecha por el mismo profesional y sin
+   marcadores de asignación/reasignación, respaldada por
+   `Contract Drawing Completed=True`. Si ODM y dibujo se entregan juntos, la fecha
+   del cambio a estado 3 se usa para ambos hitos.
 4. Antes de validar, se comprueba la cobertura real de `date_created` dentro del
    CSV. Si el log termina antes de la fecha de producción, el proceso se detiene y
    solicita un `exported-logs` más reciente; el prefijo de fecha del nombre no se usa.
@@ -71,6 +84,8 @@ antes de avanzar:
    coincidencias, diferencias, cantidades, devoluciones y trazabilidad temporal.
    Las hojas `Flujo Nuevo` y `Flujo Viejo` reciben las columnas
    `FECHA/HORA DE LLEGADA` y `FECHA/HORA DE SALIDA` como fechas reales de Excel.
+   `Flujo 2.0` recibe `FECHA/HORA DE LLEGADA`, `FECHA/HORA ENTREGA ODM` y
+   `FECHA/HORA ENTREGA DIBUJO`.
 9. También agrega la hoja `Casos no reportados`: incluye los QR ausentes de ambas
    hojas de la bitácora que tuvieron ese día un evento `2.7-Dibujo finalizado`,
    `2.6.1-Dibujo en revision`, `drawing_review` o `verify_formats`. Si un QR tuvo más
@@ -81,8 +96,9 @@ antes de avanzar:
    prefijo `CO` o nombre sin depender del orden, puntos, tildes o mayúsculas. Los
    estados de devolución no llevan este filtro de profesional.
 10. El logo OCA Global se re-inserta desde la plantilla en los encabezados codificados.
-11. Para `2.7-Dibujo finalizado` y `drawing_review`, se buscan los protocolos en
-   `Sheet1` del EXPORT y se cuentan los `GIS_GUID` únicos por tipo `P` y `T`.
+11. Para `2.7-Dibujo finalizado`, `drawing_review` y los casos de `Flujo 2.0`
+   con estado secundario `ODM_Creada-Dibujo_Finalizado`, se buscan los protocolos
+   en `Sheet1` del EXPORT y se cuentan los `GIS_GUID` únicos por tipo `P` y `T`.
 12. Para `2-Valorizado`, `2.6.1-Dibujo en revision` y `verify_formats`, se copia a `OBSERVACIONES`
     el último `comments` no vacío del mismo estado en el PMS. La búsqueda se hace
     por QR, estado y profesional hasta la salida seleccionada: aunque después aparezca
@@ -90,7 +106,7 @@ antes de avanzar:
     el estado aprobado en la bitácora.
 13. Los marcadores `N/A`, `No aplica`, `S/M` y `SM` se eliminan de
     `OBSERVACIONES`; los demás textos se conservan.
-14. En las cinco hojas operativas (`Flujo Nuevo`, `Flujo Viejo`, `Odm`,
+14. En las seis hojas operativas (`Flujo Nuevo`, `Flujo Viejo`, `Flujo 2.0`, `Odm`,
     `Correo-Rotulacion` y `PNC`) se eliminan de cualquier columna los valores
     aislados `N/A`, `S/N` y `0`. En `PNC` también se limpian los marcadores aislados
     `No aplica`, `S/M` y `SM`. Los textos que solamente contienen esas secuencias
@@ -140,7 +156,8 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Para iniciar, la interfaz solo solicita la bitácora y `exported-logs.csv`. El
+Para iniciar, la interfaz solicita la bitácora y `exported-logs.csv`. Cuando la
+bitácora contiene `Flujo 2.0`, exige además `exported-request.csv`. El
 `EXPORT_*.xlsx` se carga después, en la etapa de protocolos, cuando ya se descargó
 el listado depurado. Su cargador permanece bloqueado durante el inicio y las etapas
 1 y 2, se habilita exclusivamente en la etapa 3 y vuelve a bloquearse al cerrar las
