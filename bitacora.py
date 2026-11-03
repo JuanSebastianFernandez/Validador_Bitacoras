@@ -182,6 +182,12 @@ STATUS_NO_EVENT = "Sin movimiento en la fecha"
 STATUS_NO_QR = "Sin QR"
 STATUS_PROFESSIONAL_MISMATCH = "Revisión obligatoria: profesional PMS diferente"
 STATUS_FLOW20_AMBIGUOUS = "Revisión obligatoria: evidencia temporal insuficiente"
+STATUS_FLOW20_DUPLICATE_ODM = "Duplicado histórico: ODM entregada en fecha anterior"
+STATUS_FLOW20_DUPLICATE_DRAWING = "Duplicado histórico: dibujo entregado en fecha anterior"
+FLOW20_DUPLICATE_RESULTS = {
+    STATUS_FLOW20_DUPLICATE_ODM,
+    STATUS_FLOW20_DUPLICATE_DRAWING,
+}
 STATUS_AUDIT_KEEP = "Aprobado: conservar bitácora"
 STATUS_AUDIT_CORRECTED = "Corregido en auditoría"
 STATUS_AUDIT_EXCLUDED = "Excluido en auditoría"
@@ -2016,31 +2022,55 @@ def _validate_flow20_row(
 
     result = STATUS_MISMATCH
     timing_result = TIMING_FLOW20_AMBIGUOUS
+    duplicate_detail = ""
     if not qr:
         result = STATUS_NO_QR
     elif reported == FLOW20_ODM_STATE:
-        if odm_event is None or request_snapshot is None:
+        if odm_event is None:
             result = STATUS_NO_EVENT
-        elif new_flow_flag is False:
-            result = STATUS_MISMATCH
-        elif professional_mismatch:
-            result = STATUS_PROFESSIONAL_MISMATCH
         elif secondary == FLOW20_SECONDARY_PENDING:
-            if drawing_datetime is not None:
+            if drawing_as_of is not None:
                 result = STATUS_MISMATCH
+            elif odm_event.occurred_at.date() < production_date:
+                result = STATUS_FLOW20_DUPLICATE_ODM
+                timing_result = TIMING_FLOW20_PENDING
+                duplicate_detail = (
+                    "La ODM ya había sido entregada el "
+                    f"{odm_event.occurred_at:%d/%m/%Y}; no es un hito del corte."
+                )
+            elif request_snapshot is None:
+                result = STATUS_NO_EVENT
+            elif new_flow_flag is False:
+                result = STATUS_MISMATCH
+            elif professional_mismatch:
+                result = STATUS_PROFESSIONAL_MISMATCH
             elif request_flag is False or future_drawing is not None:
                 result = STATUS_MATCH
                 timing_result = TIMING_FLOW20_PENDING
             else:
                 result = STATUS_FLOW20_AMBIGUOUS
         elif secondary == FLOW20_SECONDARY_COMPLETED:
-            if (
+            if drawing_datetime is not None and drawing_datetime.date() < production_date:
+                result = STATUS_FLOW20_DUPLICATE_DRAWING
+                timing_result = TIMING_FLOW20_COMPLETED
+                duplicate_detail = (
+                    "El dibujo ya había sido entregado el "
+                    f"{drawing_datetime:%d/%m/%Y}; no es un hito del corte."
+                )
+            elif request_snapshot is None:
+                result = STATUS_NO_EVENT
+            elif new_flow_flag is False:
+                result = STATUS_MISMATCH
+            elif (
                 drawing_datetime is not None
                 and drawing_datetime.date() == production_date
                 and request_flag is True
             ):
-                result = STATUS_MATCH
-                timing_result = TIMING_FLOW20_COMPLETED
+                if professional_mismatch:
+                    result = STATUS_PROFESSIONAL_MISMATCH
+                else:
+                    result = STATUS_MATCH
+                    timing_result = TIMING_FLOW20_COMPLETED
             elif request_flag is True and drawing_datetime is None:
                 result = STATUS_FLOW20_AMBIGUOUS
             else:
@@ -2071,6 +2101,9 @@ def _validate_flow20_row(
             result = STATUS_MISMATCH
         actor_event = day_event
         timing_result = TIMING_NOT_APPLICABLE
+
+    if duplicate_detail:
+        evidence_parts.append(duplicate_detail)
 
     pms_state = (
         FLOW20_ODM_STATE
@@ -2482,6 +2515,52 @@ def validate_rows(
 
 def validation_audit_key(item: ValidationRow) -> str:
     return f"{item.sheet}|{item.excel_row}|{item.qr}"
+
+
+def flow20_duplicate_audit_entries(
+    validations: Iterable[ValidationRow],
+) -> list[dict[str, Any]]:
+    """Record historical Flow 2.0 milestones excluded without manual review."""
+    entries: list[dict[str, Any]] = []
+    for item in validations:
+        if item.result not in FLOW20_DUPLICATE_RESULTS:
+            continue
+        milestone_datetime = (
+            item.odm_datetime
+            if item.result == STATUS_FLOW20_DUPLICATE_ODM
+            else item.drawing_datetime
+        )
+        milestone = (
+            "entrega de ODM"
+            if item.result == STATUS_FLOW20_DUPLICATE_ODM
+            else "entrega de dibujo"
+        )
+        entries.append(
+            {
+                "Etapa": "Control de redundancia Flujo 2.0",
+                "Hoja/Flujo": item.sheet,
+                "QR/Referencia": item.qr,
+                "Decisión": "Excluir duplicado automáticamente",
+                "Estado inicial": item.reported_state,
+                "Estado final": item.reported_state,
+                "Estado secundario": item.reported_secondary_state,
+                "AGP": item.agp,
+                "Protocolo": item.protocol,
+                "ODM": item.odm,
+                "Fecha/hora de llegada": item.arrival_datetime,
+                "Fecha/hora de salida": item.exit_datetime,
+                "Fecha/hora entrega ODM": item.odm_datetime,
+                "Fecha/hora entrega dibujo": item.drawing_datetime,
+                "Detalle": (
+                    f"Se excluyó porque la {milestone} pertenece al "
+                    f"{milestone_datetime:%d/%m/%Y %H:%M:%S} y no a la "
+                    "fecha de corte de esta bitácora."
+                    if milestone_datetime
+                    else "Se excluyó porque el hito pertenece a una fecha anterior."
+                ),
+            }
+        )
+    return entries
 
 
 def apply_state_audit_decisions(
@@ -2953,10 +3032,12 @@ def apply_protocol_counts_to_validations(
 ) -> list[ValidationRow]:
     updated: list[ValidationRow] = []
     for item in validations:
-        if item.result == STATUS_AUDIT_EXCLUDED:
+        if item.result not in UPLOAD_APPROVED_RESULTS:
             updated.append(
                 replace(
                     item,
+                    export_pel=None,
+                    export_tratas=None,
                     export_pel_breakdown=None,
                     export_tratas_breakdown=None,
                     count_result=COUNT_NOT_APPLICABLE,
@@ -3897,7 +3978,7 @@ def _add_validation_result_sheet(wb, validations: list[ValidationRow]) -> None:
             result_cell.fill = match_fill
         elif result_cell.value == STATUS_MISMATCH:
             result_cell.fill = mismatch_fill
-        elif result_cell.value == STATUS_AUDIT_EXCLUDED:
+        elif result_cell.value == STATUS_AUDIT_EXCLUDED or result_cell.value in FLOW20_DUPLICATE_RESULTS:
             result_cell.fill = neutral_fill
         else:
             result_cell.fill = warning_fill
@@ -4161,10 +4242,14 @@ def _add_guided_audit_sheet(
         "Decisión",
         "Estado inicial",
         "Estado final",
+        "Estado secundario",
         "AGP",
         "Protocolo",
+        "ODM",
         "Fecha/hora de llegada",
         "Fecha/hora de salida",
+        "Fecha/hora entrega ODM",
+        "Fecha/hora entrega dibujo",
         "Detalle",
     ]
     ws = wb.create_sheet(SHEET_GUIDED_AUDIT)
@@ -4186,7 +4271,7 @@ def _add_guided_audit_sheet(
     for row in range(2, ws.max_row + 1):
         for column in range(1, len(headers) + 1):
             ws.cell(row, column).alignment = Alignment(vertical="top", wrap_text=True)
-        for column in (9, 10):
+        for column in (11, 12, 13, 14):
             if ws.cell(row, column).value:
                 parsed = parse_audit_datetime(ws.cell(row, column).value)
                 ws.cell(row, column).value = parsed
@@ -4194,7 +4279,9 @@ def _add_guided_audit_sheet(
         decision = normalize_header(ws.cell(row, 4).value)
         if decision in {"AGREGAR", "CORREGIR", "CONSERVAR BITACORA"}:
             ws.cell(row, 4).fill = PatternFill("solid", fgColor="D9EAD3")
-        elif decision in {"EXCLUIR", "NO AGREGAR"}:
+        elif decision in {"EXCLUIR", "NO AGREGAR"} or decision.startswith(
+            "EXCLUIR DUPLICADO"
+        ):
             ws.cell(row, 4).fill = PatternFill("solid", fgColor="E7E6E6")
         elif decision == "NO APLICA":
             ws.cell(row, 4).fill = PatternFill("solid", fgColor="FFF2CC")
@@ -4207,11 +4294,15 @@ def _add_guided_audit_sheet(
         "D": 24,
         "E": 28,
         "F": 28,
-        "G": 22,
-        "H": 34,
-        "I": 22,
+        "G": 34,
+        "H": 22,
+        "I": 34,
         "J": 22,
-        "K": 62,
+        "K": 22,
+        "L": 22,
+        "M": 22,
+        "N": 22,
+        "O": 62,
     }
     for column, width in widths.items():
         ws.column_dimensions[column].width = width
@@ -4219,7 +4310,7 @@ def _add_guided_audit_sheet(
     if entries:
         _rebuild_table(ws, "AuditoriaGuiada", len(headers), ws.max_row)
     else:
-        ws.merge_cells("A3:K3")
+        ws.merge_cells("A3:O3")
         ws["A3"] = "La auditoría guiada no registró decisiones manuales."
         ws["A3"].font = Font(italic=True, color="548235")
         ws["A3"].alignment = Alignment(horizontal="center")

@@ -12,6 +12,7 @@ from bitacora import (
     DRAWING_OUTPUT_STATES,
     FINAL_ELEMENT_STATES,
     FLOW20_ODM_STATE,
+    FLOW20_DUPLICATE_RESULTS,
     FLOW20_SECONDARY_COMPLETED,
     FLOW20_SECONDARY_PENDING,
     FLOW20_STATES,
@@ -39,6 +40,7 @@ from bitacora import (
     email_quantity_frame,
     evaluate_email_quantities,
     extract_workbook_rows,
+    flow20_duplicate_audit_entries,
     has_invalid_agp_separator,
     has_invalid_protocol_prefix,
     has_invalid_protocol_separator,
@@ -186,7 +188,7 @@ def protocol_issue_key(sheet: str, row: int, reference: str) -> str:
 def protocol_references(workbook_bytes: bytes, validations: list[Any]) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
     for item in validations:
-        if item.result == STATUS_AUDIT_EXCLUDED or not validation_requires_element_counts(item):
+        if item.result not in UPLOAD_APPROVED_RESULTS or not validation_requires_element_counts(item):
             continue
         refs.append(
             {
@@ -241,21 +243,64 @@ def audit_state_stage(context: dict[str, Any]) -> None:
             "Se corrigieron QR truncados porque PMS tenía una única coincidencia con "
             f"un carácter final adicional: {corrections}. La corrección quedará en la auditoría."
         )
-    issues = [item for item in validations if item.result != STATUS_MATCH]
+    duplicates = [
+        item for item in validations if item.result in FLOW20_DUPLICATE_RESULTS
+    ]
+    issues = [
+        item
+        for item in validations
+        if item.result != STATUS_MATCH
+        and item.result not in FLOW20_DUPLICATE_RESULTS
+    ]
+    matches = sum(item.result == STATUS_MATCH for item in validations)
     decisions = context.setdefault("state_decisions", {})
     completed = sum(validation_audit_key(item) in decisions for item in issues)
     render_summary_panel(
         eyebrow="Etapa 1",
         title="Auditoría de estados",
-        subtitle="Cada diferencia se decide una sola vez. Los casos coincidentes ya están aprobados.",
+        subtitle=(
+            "Cada diferencia se decide una sola vez. Los hitos de Flujo 2.0 "
+            "que pertenecen a fechas anteriores se excluyen automáticamente."
+        ),
         cards=[
-            ("Coinciden", len(validations) - len(issues), "No requieren intervención", "success"),
+            ("Coinciden", matches, "No requieren intervención", "success"),
+            (
+                "Duplicados históricos",
+                len(duplicates),
+                "Excluidos sin volver a auditarlos",
+                "neutral",
+            ),
             ("Por revisar", len(issues) - completed, "Decisiones pendientes", "warning"),
             ("Revisados", completed, "Decisiones guardadas", "teal"),
         ],
     )
+    if duplicates:
+        with st.expander(
+            f"Hitos de Flujo 2.0 excluidos por redundancia ({len(duplicates)})"
+        ):
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "QR": item.qr,
+                            "Estado secundario": item.reported_secondary_state,
+                            "Resultado": item.result,
+                            "Fecha entrega ODM": item.odm_datetime,
+                            "Fecha entrega dibujo": item.drawing_datetime,
+                        }
+                        for item in duplicates
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
     if not issues:
-        st.success("No hay diferencias de estado. Puedes continuar.")
+        st.success(
+            "No hay diferencias que requieran decisión manual. "
+            "Los duplicados históricos ya quedaron excluidos y trazados."
+            if duplicates
+            else "No hay diferencias de estado. Puedes continuar."
+        )
     else:
         cursor = min(st.session_state.get("audit_state_cursor", 0), len(issues) - 1)
         st.session_state.audit_state_cursor = cursor
@@ -1339,13 +1384,21 @@ def audit_final_stage(context: dict[str, Any]) -> None:
     email_results = context["email_quantity_results"]
     counts = Counter(item.result for item in validations)
     approved = sum(counts[result] for result in UPLOAD_APPROVED_RESULTS)
+    historical_duplicates = sum(counts[result] for result in FLOW20_DUPLICATE_RESULTS)
+    excluded = counts[STATUS_AUDIT_EXCLUDED] + historical_duplicates
     render_summary_panel(
         eyebrow="Etapa 4",
         title="Auditoría terminada",
         subtitle="El Excel conserva la estructura codificada F-AGP-04 y agrega la trazabilidad de tus decisiones.",
         cards=[
             ("Filas aprobadas", approved, "Incluidas en los flujos", "success"),
-            ("Filas excluidas", counts[STATUS_AUDIT_EXCLUDED], "No pasan al cargue", "neutral"),
+            ("Filas excluidas", excluded, "No pasan al cargue", "neutral"),
+            (
+                "Duplicados históricos",
+                historical_duplicates,
+                "Hitos ya reportables en fechas anteriores",
+                "info",
+            ),
             ("Decisiones", len(context["audit_entries"]), "Registradas en Auditoria guiada", "teal"),
         ],
     )
@@ -1364,7 +1417,8 @@ def audit_final_stage(context: dict[str, Any]) -> None:
         quantity_keys = {
             (item.sheet, item.excel_row, item.qr)
             for item in validations
-            if validation_requires_element_counts(item)
+            if item.result in UPLOAD_APPROVED_RESULTS
+            and validation_requires_element_counts(item)
         }
         flow_mask = frame.apply(
             lambda row: (
@@ -1523,6 +1577,7 @@ if start:
             production_date=production_date,
             request_snapshots=request_snapshots,
         )
+        duplicate_audit_entries = flow20_duplicate_audit_entries(validations)
         st.session_state.audit_context = {
             "production_date": production_date,
             "workbook_name": workbook_file.name,
@@ -1539,7 +1594,10 @@ if start:
             "state_decisions": {},
             "unreported_decisions": {},
             "protocol_decisions": {},
-            "audit_entries": qr_audit_entries,
+            "audit_entries": [
+                *qr_audit_entries,
+                *duplicate_audit_entries,
+            ],
         }
         st.session_state.audit_step = 1
         st.rerun()

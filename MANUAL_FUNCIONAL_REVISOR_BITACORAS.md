@@ -589,9 +589,14 @@ ESTADO SECUNDARIO = ODM_Creada-Pendiente_Dibujo
 ```
 
 la fila coincide cuando la ODM existe y `Contract Drawing Completed` sigue en
-`False`. También puede coincidir históricamente si hoy la marca está en `True`,
-pero el log demuestra que la repetición de entrega del dibujo ocurrió después
-de la fecha de corte. La fecha de dibujo queda vacía.
+`False` y la entrega de la ODM ocurrió exactamente en la fecha de corte. También
+puede coincidir históricamente si hoy la marca está en `True`, pero el log
+demuestra que la repetición de entrega del dibujo ocurrió después de la fecha de
+corte. La fecha de dibujo queda vacía.
+
+Si la ODM pertenece a un día anterior, la fila no representa producción nueva:
+se clasifica como `Duplicado histórico: ODM entregada en fecha anterior`, se
+excluye automáticamente del cargue y no genera una tarjeta de auditoría manual.
 
 ### 11.3 Estado secundario finalizado
 
@@ -610,6 +615,10 @@ No se consideran entrega de dibujo las repeticiones cuyo comentario indique
 asignación, reasignación o marcación de nodos. Tampoco se acepta automáticamente
 una repetición hecha por otro profesional.
 
+Si la fecha demostrable del dibujo es anterior al corte, el resultado es
+`Duplicado histórico: dibujo entregado en fecha anterior`. Tampoco vuelve a
+participar en protocolos o cantidades PEL/TRATA.
+
 ### 11.4 Evidencia ambigua y auditoría
 
 Si el request dice `True`, pero la ODM ocurrió antes del día de corte y el log
@@ -623,6 +632,19 @@ Durante la auditoría se confirman por separado:
 
 La entrega de dibujo no puede ser anterior a la ODM y la ODM no puede ser
 anterior a la llegada.
+
+### 11.5 Regla de no redundancia para coordinación
+
+La hoja de producción registra **hitos del día**, no el inventario diario de
+casos abiertos. Un QR puede aparecer como máximo una vez por cada hito del ciclo:
+
+1. el día de entrega de la ODM, como pendiente de dibujo;
+2. el día de entrega del dibujo, como dibujo finalizado.
+
+Mientras el caso permanezca varios días en estado 3 sin una nueva entrega, debe
+conservarse en un control separado de pendientes y no copiarse nuevamente a la
+bitácora de producción. Las exclusiones automáticas quedan registradas en
+`Auditoria guiada` con la fecha real del hito anterior.
 
 ## 12. Confirmación manual de tiempos en la interfaz
 

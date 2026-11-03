@@ -66,6 +66,10 @@ antes de avanzar:
    marcadores de asignación/reasignación, respaldada por
    `Contract Drawing Completed=True`. Si ODM y dibujo se entregan juntos, la fecha
    del cambio a estado 3 se usa para ambos hitos.
+   Cada hito se admite únicamente en su fecha real: un pendiente cuya ODM fue
+   entregada en un día anterior, o un dibujo ya entregado antes del corte, se marca
+   como `Duplicado histórico`, se excluye automáticamente del cargue y queda en la
+   trazabilidad sin volver a pasar por auditoría manual.
 4. Antes de validar, se comprueba la cobertura real de `date_created` dentro del
    CSV. Si el log termina antes de la fecha de producción, el proceso se detiene y
    solicita un `exported-logs` más reciente; el prefijo de fecha del nombre no se usa.

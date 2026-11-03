@@ -16,10 +16,13 @@ from bitacora import (
     COUNT_AUDIT_NOT_APPLICABLE,
     COUNT_INVALID_PROTOCOL_PREFIX,
     COUNT_INVALID_PROTOCOL_SEPARATOR,
+    COUNT_NOT_APPLICABLE,
     COUNT_PROTOCOLS_INCOMPLETE,
     COUNT_UPDATED,
     DRAWING_DATETIME_HEADER,
     FLOW20_ODM_STATE,
+    STATUS_FLOW20_DUPLICATE_DRAWING,
+    STATUS_FLOW20_DUPLICATE_ODM,
     FLOW20_SECONDARY_COMPLETED,
     FLOW20_SECONDARY_PENDING,
     ODM_DATETIME_HEADER,
@@ -50,6 +53,7 @@ from bitacora import (
     compare_protocol_quantities,
     evaluate_email_quantities,
     extract_workbook_rows,
+    flow20_duplicate_audit_entries,
     has_invalid_agp_separator,
     has_invalid_protocol_prefix,
     invalid_protocol_prefixes,
@@ -1154,7 +1158,7 @@ def test_output_adds_guided_audit_as_the_last_sheet():
     ws = wb["Auditoria guiada"]
     assert ws["A2"].value == "Estados"
     assert ws["C2"].value == "QR-N"
-    assert ws.tables["AuditoriaGuiada"].ref == "A1:K2"
+    assert ws.tables["AuditoriaGuiada"].ref == "A1:O2"
 
 
 def test_output_adds_protocol_justification_and_image_evidence_sheet():
@@ -2318,3 +2322,107 @@ def test_flow20_pending_accepts_a_drawing_repeat_after_the_cutoff():
     assert item.result == STATUS_MATCH
     assert item.odm_datetime == datetime(2026, 10, 29, 10, 0)
     assert item.drawing_datetime is None
+
+
+def test_flow20_pending_from_previous_day_is_auto_excluded_as_duplicate():
+    workbook = make_flow20_workbook(secondary=FLOW20_SECONDARY_PENDING)
+    _, rows = extract_workbook_rows(workbook)
+    log = StringIO(
+        "request_code;initial_state;final_state;date_created;username;user_created_last_name;comments\n"
+        "QR-20;0-Por Valorizar;2-Valorizado;2026-10-29 07:00:00;;Sistema;\n"
+        "QR-20;2-Valorizado;2.5-Enviado a dibujo;2026-10-29 08:00:00;;Sistema;\n"
+        "QR-20;2.5-Enviado a dibujo;2.6-Dibujante asignado;2026-10-29 09:00:00;;Sistema;\n"
+        "QR-20;2.6-Dibujante asignado;3-ODM Asignadas;2026-10-29 10:00:00;"
+        "CO1049796769;Sanchez Mondragon.Manuel Fernando;OK\n"
+    )
+    on_day, as_of, _, _, timelines = read_log_validation_data(
+        log,
+        {"QR-20"},
+        date(2026, 10, 30),
+        include_timelines=True,
+    )
+    validations = validate_rows(
+        rows,
+        on_day,
+        as_of,
+        timelines=timelines,
+        production_date=date(2026, 10, 30),
+        request_snapshots={
+            "QR-20": RequestSnapshot(
+                qr="QR-20",
+                drawing_completed=False,
+                new_fulfillment_process=True,
+            )
+        },
+    )
+    item = next(row for row in validations if row.sheet == SHEET_FLOW20)
+
+    assert item.result == STATUS_FLOW20_DUPLICATE_ODM
+    entries = flow20_duplicate_audit_entries(validations)
+    assert len(entries) == 1
+    assert entries[0]["Decisión"] == "Excluir duplicado automáticamente"
+    assert "29/10/2026" in entries[0]["Detalle"]
+
+
+def test_flow20_completed_from_previous_day_is_not_sent_to_protocol_stage():
+    workbook = make_flow20_workbook(secondary=FLOW20_SECONDARY_COMPLETED)
+    _, rows = extract_workbook_rows(workbook)
+    log = StringIO(
+        "request_code;initial_state;final_state;date_created;username;user_created_last_name;comments\n"
+        "QR-20;0-Por Valorizar;2-Valorizado;2026-10-28 07:00:00;;Sistema;\n"
+        "QR-20;2-Valorizado;2.5-Enviado a dibujo;2026-10-28 08:00:00;;Sistema;\n"
+        "QR-20;2.5-Enviado a dibujo;2.6-Dibujante asignado;2026-10-28 09:00:00;;Sistema;\n"
+        "QR-20;2.6-Dibujante asignado;3-ODM Asignadas;2026-10-28 10:00:00;"
+        "CO1049796769;Sanchez Mondragon.Manuel Fernando;OK\n"
+        "QR-20;3-ODM Asignadas;3-ODM Asignadas;2026-10-29 11:00:00;"
+        "CO1049796769;Sanchez Mondragon.Manuel Fernando;URL dibujo\n"
+    )
+    on_day, as_of, _, _, timelines = read_log_validation_data(
+        log,
+        {"QR-20"},
+        date(2026, 10, 30),
+        include_timelines=True,
+    )
+    validations = validate_rows(
+        rows,
+        on_day,
+        as_of,
+        timelines=timelines,
+        production_date=date(2026, 10, 30),
+        request_snapshots={
+            "QR-20": RequestSnapshot(
+                qr="QR-20",
+                drawing_completed=True,
+                new_fulfillment_process=True,
+            )
+        },
+    )
+    item = next(row for row in validations if row.sheet == SHEET_FLOW20)
+    assert item.result == STATUS_FLOW20_DUPLICATE_DRAWING
+
+    counted = apply_protocol_counts_to_validations(
+        validations,
+        {
+            "1000147997": ProtocolElementCounts(
+                pel_ids=frozenset({"P-1"}),
+                tratta_ids=frozenset({"T-1"}),
+            )
+        },
+    )
+    counted_item = next(row for row in counted if row.sheet == SHEET_FLOW20)
+    assert counted_item.count_result == COUNT_NOT_APPLICABLE
+    assert counted_item.export_pel is None
+    assert counted_item.export_tratas is None
+
+    output = build_upload_workbook(
+        workbook,
+        counted,
+        matches_only=True,
+        template_bytes=make_template_workbook(),
+        audit_entries=flow20_duplicate_audit_entries(counted),
+    )
+    wb = load_workbook(BytesIO(output), data_only=False)
+    assert wb[SHEET_FLOW20].tables["Flujo20"].ref == "A5:Q6"
+    assert wb[SHEET_FLOW20]["B6"].value is None
+    assert wb["Auditoria guiada"]["D2"].value == "Excluir duplicado automáticamente"
+    wb.close()
