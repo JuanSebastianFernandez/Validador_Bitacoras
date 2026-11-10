@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import math
 import re
+import shutil
 import unicodedata
 import zipfile
+from xml.parsers import expat
+from xml.etree import ElementTree
 from html import unescape
 from copy import copy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from posixpath import normpath
 from typing import Any, BinaryIO, Iterable
 
 import pandas as pd
@@ -17,6 +21,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.utils.cell import get_column_letter, range_boundaries
 
 
 SHEET_NEW = "Flujo Nuevo"
@@ -76,6 +81,9 @@ FLOW20_TIMING_HEADERS = (
     DRAWING_DATETIME_HEADER,
 )
 EXCEL_DATETIME_FORMAT = "dd/mm/yyyy hh:mm:ss"
+CSV_CHUNK_ROWS = 50_000
+WORKSHEET_COMPACTION_MIN_BYTES = 5 * 1024 * 1024
+WORKSHEET_COMPACTION_MIN_ROWS = 1_000
 
 LEGACY_STATES = {
     "2-Valorizado",
@@ -799,14 +807,218 @@ def _detect_header_row(
     )
 
 
+def _worksheet_formatting_tail(source: BinaryIO) -> dict[str, Any] | None:
+    """Locate a large, value-free trailing row span without building a cell tree.
+
+    XML byte offsets let us keep the original sheet XML (including namespaces,
+    drawings and validations). A formula or any value/inline-string node makes
+    its row nonempty, even when its cached/displayed result is blank or zero.
+    """
+    parser = expat.ParserCreate(namespace_separator="}")
+    in_data = False
+    in_row = False
+    row_start = 0
+    row_number = 0
+    row_cells = 0
+    row_has_content = False
+    tail_start: int | None = None
+    tail_rows = 0
+    tail_cells = 0
+    last_content_row = 0
+    dimension_start: int | None = None
+    dimension_ref = ""
+    tail_end: int | None = None
+
+    def start(name: str, attrs: dict[str, str]) -> None:
+        nonlocal in_data, in_row, row_start, row_number, row_cells
+        nonlocal row_has_content, dimension_start, dimension_ref
+        tag = name.rsplit("}", 1)[-1]
+        if tag == "dimension":
+            dimension_start = parser.CurrentByteIndex
+            dimension_ref = attrs.get("ref", "")
+        elif tag == "sheetData":
+            in_data = True
+        elif in_data and tag == "row":
+            in_row = True
+            row_start = parser.CurrentByteIndex
+            row_number = int(attrs.get("r", "0"))
+            row_cells = 0
+            row_has_content = False
+        elif in_row:
+            if tag == "c":
+                row_cells += 1
+            elif tag in {"v", "f", "is"}:
+                row_has_content = True
+            elif tag not in {"t", "r", "rPr"}:
+                # Unknown row content is not safe to discard as formatting.
+                row_has_content = True
+
+    def end(name: str) -> None:
+        nonlocal in_data, in_row, tail_start, tail_end, tail_rows, tail_cells
+        nonlocal last_content_row
+        tag = name.rsplit("}", 1)[-1]
+        if tag == "row" and in_row:
+            if row_has_content:
+                last_content_row = row_number
+                tail_start = None
+                tail_rows = tail_cells = 0
+            else:
+                if tail_start is None:
+                    tail_start = row_start
+                tail_rows += 1
+                tail_cells += row_cells
+            in_row = False
+        elif tag == "sheetData":
+            tail_end = parser.CurrentByteIndex
+            in_data = False
+
+    def reject_doctype(*args: Any) -> None:
+        raise BitacoraError("La bitácora contiene una definición XML no permitida.")
+
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.StartDoctypeDeclHandler = reject_doctype
+    for block in iter(lambda: source.read(1024 * 1024), b""):
+        parser.Parse(block, False)
+    parser.Parse(b"", True)
+    if (
+        tail_start is None
+        or tail_end is None
+        or dimension_start is None
+        or tail_rows < WORKSHEET_COMPACTION_MIN_ROWS
+    ):
+        return None
+    min_col, min_row, max_col, _ = range_boundaries(dimension_ref)
+    last_row = max(last_content_row, min_row)
+    return {
+        "start": tail_start,
+        "end": tail_end,
+        "dimension_start": dimension_start,
+        "dimension": (
+            f"{get_column_letter(min_col)}{min_row}:"
+            f"{get_column_letter(max_col)}{last_row}"
+        ),
+        "last_content_row": last_content_row,
+        "removed_rows": tail_rows,
+        "removed_cells": tail_cells,
+    }
+
+
+def _copy_xml_bytes(source: BinaryIO, target: BinaryIO | None, size: int) -> None:
+    if size < 0:
+        raise BitacoraError("Los límites XML de una hoja de la bitácora no son válidos.")
+    while size:
+        block = source.read(min(size, 1024 * 1024))
+        if not block:
+            raise BitacoraError("El XML de una hoja de la bitácora está incompleto.")
+        if target is not None:
+            target.write(block)
+        size -= len(block)
+
+
+def compact_workbook_formatting(
+    workbook_bytes: bytes,
+) -> tuple[bytes, list[dict[str, Any]]]:
+    """Trim only excessive trailing style-only rows in the working XLSX copy.
+
+    Never truncates at a fixed row limit or ignores hidden/non-operational sheets.
+    All rows through the last value/formula, and all other ZIP parts, are kept.
+    The uploaded file is not modified. Small/normal sheets take the unchanged path.
+    """
+    patches: dict[str, dict[str, Any]] = {}
+    try:
+        with zipfile.ZipFile(BytesIO(workbook_bytes)) as original:
+            for info in original.infolist():
+                if (
+                    info.filename.startswith("xl/worksheets/")
+                    and info.filename.endswith(".xml")
+                    and "/_rels/" not in info.filename
+                    and info.file_size >= WORKSHEET_COMPACTION_MIN_BYTES
+                ):
+                    with original.open(info) as source:
+                        tail = _worksheet_formatting_tail(source)
+                    if tail:
+                        patches[info.filename] = tail
+            if not patches:
+                return workbook_bytes, []
+
+            # Resolve titles through relationship IDs, not assumed sheet ordering.
+            ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            relationships = ElementTree.fromstring(original.read("xl/_rels/workbook.xml.rels"))
+            paths = {
+                rel.attrib["Id"]: normpath("xl/" + rel.attrib["Target"])
+                if not rel.attrib["Target"].startswith("/")
+                else rel.attrib["Target"].lstrip("/")
+                for rel in relationships
+            }
+            titles = {
+                paths.get(sheet.attrib.get(f"{{{rel_ns}}}id", "")): sheet.attrib["name"]
+                for sheet in ElementTree.fromstring(original.read("xl/workbook.xml")).findall("s:sheets/s:sheet", ns)
+            }
+            output = BytesIO()
+            with zipfile.ZipFile(output, "w") as compacted:
+                compacted.comment = original.comment
+                for info in original.infolist():
+                    tail = patches.get(info.filename)
+                    with original.open(info) as source, compacted.open(copy(info), "w") as target:
+                        if not tail:
+                            shutil.copyfileobj(source, target, length=1024 * 1024)
+                            continue
+                        _copy_xml_bytes(source, target, tail["dimension_start"])
+                        # Only the small dimension tag is reconstructed. The rest
+                        # is copied byte-for-byte, so Excel extensions survive.
+                        dimension_tag = bytearray()
+                        while not dimension_tag.endswith(b">"):
+                            byte = source.read(1)
+                            if not byte or len(dimension_tag) > 16_384:
+                                raise BitacoraError("La dimensión XML de una hoja no es válida.")
+                            dimension_tag.extend(byte)
+                        dimension_tag = re.sub(
+                            rb"\bref=([\"']).*?\1",
+                            b'ref="' + tail["dimension"].encode("ascii") + b'"',
+                            bytes(dimension_tag),
+                            count=1,
+                        )
+                        target.write(dimension_tag)
+                        _copy_xml_bytes(source, target, tail["start"] - source.tell())
+                        _copy_xml_bytes(source, None, tail["end"] - tail["start"])
+                        shutil.copyfileobj(source, target, length=1024 * 1024)
+            entries = [
+                {
+                    "Etapa": "Preparación del Excel",
+                    "Hoja/Flujo": titles.get(path, path),
+                    "Decisión": "Omitir cola vacía de formato",
+                    "Detalle": (
+                        f"Se omitieron {tail['removed_rows']:,} filas finales sin valores ni "
+                        f"fórmulas ({tail['removed_cells']:,} celdas vacías con formato). "
+                        f"Última fila con contenido: {tail['last_content_row']}. "
+                        "Se conservaron los registros y el archivo original."
+                    ),
+                }
+                for path, tail in patches.items()
+            ]
+            return output.getvalue(), entries
+    except BitacoraError:
+        raise
+    except Exception as exc:
+        raise BitacoraError("No pude preparar la copia de trabajo de la bitácora.") from exc
+
+
 def extract_workbook_rows(
     workbook_source: str | Path | BinaryIO | bytes,
+    *,
+    cleanup_entries: list[dict[str, Any]] | None = None,
 ) -> tuple[bytes, list[dict[str, Any]]]:
     source = _rewind(workbook_source)
     if isinstance(source, (str, Path)):
         workbook_bytes = Path(source).read_bytes()
     else:
         workbook_bytes = source.read()
+
+    workbook_bytes, preparation_entries = compact_workbook_formatting(workbook_bytes)
+    if cleanup_entries is not None:
+        cleanup_entries.extend(preparation_entries)
 
     try:
         wb = load_workbook(BytesIO(workbook_bytes), read_only=True, data_only=False)
@@ -841,9 +1053,12 @@ def extract_workbook_rows(
         secondary_col = headers.get("ESTADO SECUNDARIO")
         odm_col = headers.get("ODM")
         delivered_col = headers.get("FECHA ENTREGADO")
-        for row_number in range(header_row + 1, ws.max_row + 1):
-            qr = normalize_text(ws.cell(row_number, qr_col).value)
-            state = canonicalize_state(ws.cell(row_number, state_col).value)
+        for row_number, values in enumerate(
+            ws.iter_rows(min_row=header_row + 1, max_col=max(headers.values()), values_only=True),
+            start=header_row + 1,
+        ):
+            qr = normalize_text(values[qr_col - 1])
+            state = canonicalize_state(values[state_col - 1])
             if not qr and not state:
                 continue
             rows.append(
@@ -854,42 +1069,42 @@ def extract_workbook_rows(
                     "reported_state": state,
                     "reported_secondary_state": (
                         canonicalize_flow20_secondary(
-                            ws.cell(row_number, secondary_col).value
+                            values[secondary_col - 1]
                         )
                         if secondary_col
                         else ""
                     ),
                     "professional": (
-                        normalize_text(ws.cell(row_number, user_col).value)
+                        normalize_text(values[user_col - 1])
                         if user_col
                         else ""
                     ),
                     "agp": (
-                        normalize_identifier(ws.cell(row_number, agp_col).value)
+                        normalize_identifier(values[agp_col - 1])
                         if agp_col
                         else ""
                     ),
                     "protocol": (
-                        normalize_identifier(ws.cell(row_number, protocol_col).value)
+                        normalize_identifier(values[protocol_col - 1])
                         if protocol_col
                         else ""
                     ),
                     "odm": (
-                        normalize_identifier(ws.cell(row_number, odm_col).value)
+                        normalize_identifier(values[odm_col - 1])
                         if odm_col
                         else ""
                     ),
                     "reported_delivery_date": (
-                        ws.cell(row_number, delivered_col).value
+                        values[delivered_col - 1]
                         if delivered_col
                         else None
                     ),
-                    "reported_pel": ws.cell(row_number, pel_col).value if pel_col else None,
+                    "reported_pel": values[pel_col - 1] if pel_col else None,
                     "reported_tratas": (
-                        ws.cell(row_number, tratas_col).value if tratas_col else None
+                        values[tratas_col - 1] if tratas_col else None
                     ),
                     "reported_observation": (
-                        normalize_text(ws.cell(row_number, observation_col).value)
+                        normalize_text(values[observation_col - 1])
                         if observation_col
                         else ""
                     ),
@@ -960,7 +1175,7 @@ def read_request_snapshots(
     request_source: str | Path | BinaryIO | bytes,
     qrs: set[str] | None = None,
     *,
-    chunksize: int = 200_000,
+    chunksize: int = CSV_CHUNK_ROWS,
 ) -> dict[str, RequestSnapshot]:
     """Read the current PMS request snapshot used by Flujo 2.0."""
     source = _rewind(request_source)
@@ -1231,22 +1446,25 @@ def evaluate_email_quantities(
         tratas_col = headers.get("CANTIDAD TRATAS")
         results: list[EmailQuantityResult] = []
 
-        for row_number in range(header_row + 1, ws.max_row + 1):
-            origin = normalize_text(ws.cell(row_number, origin_col).value)
+        for row_number, values in enumerate(
+            ws.iter_rows(min_row=header_row + 1, max_col=max(headers.values()), values_only=True),
+            start=header_row + 1,
+        ):
+            origin = normalize_text(values[origin_col - 1])
             if normalize_header(origin) != EMAIL_QUANTITY_ORIGIN:
                 continue
-            state = normalize_text(ws.cell(row_number, state_col).value)
+            state = normalize_text(values[state_col - 1])
             if normalize_header(state) != EMAIL_QUANTITY_STATE:
                 continue
-            subject = normalize_text(ws.cell(row_number, subject_col).value)
+            subject = normalize_text(values[subject_col - 1])
             protocol = (
-                normalize_identifier(ws.cell(row_number, protocol_col).value)
+                normalize_identifier(values[protocol_col - 1])
                 if protocol_col
                 else ""
             )
-            reported_pel = ws.cell(row_number, pel_col).value if pel_col else None
+            reported_pel = values[pel_col - 1] if pel_col else None
             reported_tratas = (
-                ws.cell(row_number, tratas_col).value if tratas_col else None
+                values[tratas_col - 1] if tratas_col else None
             )
             export_pel, export_tratas, count_result = compare_protocol_quantities(
                 protocol,
@@ -1281,7 +1499,7 @@ def evaluate_email_quantities(
 def _read_log_chunks(
     log_source: str | Path | BinaryIO | bytes,
     *,
-    chunksize: int = 250_000,
+    chunksize: int = CSV_CHUNK_ROWS,
 ) -> Iterable[pd.DataFrame]:
     source = _rewind(log_source)
     try:
@@ -1384,7 +1602,7 @@ def read_full_log_timelines(
     log_source: str | Path | BinaryIO | bytes,
     qrs: set[str],
     *,
-    chunksize: int = 250_000,
+    chunksize: int = CSV_CHUNK_ROWS,
 ) -> dict[str, list[DrawingLogEvent]]:
     """Read the complete history for a bounded QR set, including territory states."""
     targets = {normalize_text(qr) for qr in qrs if normalize_text(qr)}
@@ -1423,7 +1641,7 @@ def read_log_validation_data(
     qrs: set[str],
     production_date: date,
     *,
-    chunksize: int = 250_000,
+    chunksize: int = CSV_CHUNK_ROWS,
     allowed_states_by_qr: dict[str, set[str]] | None = None,
     include_rejection_comments: bool = False,
     include_timelines: bool = False,
@@ -1691,7 +1909,7 @@ def read_log_states_with_coverage(
     qrs: set[str],
     production_date: date,
     *,
-    chunksize: int = 250_000,
+    chunksize: int = CSV_CHUNK_ROWS,
     allowed_states_by_qr: dict[str, set[str]] | None = None,
 ) -> tuple[dict[str, LogState], dict[str, LogState], LogCoverage]:
     """Return matching states plus the real date coverage found in the log."""
@@ -1710,7 +1928,7 @@ def read_latest_log_states(
     qrs: set[str],
     production_date: date,
     *,
-    chunksize: int = 250_000,
+    chunksize: int = CSV_CHUNK_ROWS,
     allowed_states_by_qr: dict[str, set[str]] | None = None,
 ) -> tuple[dict[str, LogState], dict[str, LogState]]:
     """Return latest drawing state on the day and latest state up to end of day."""

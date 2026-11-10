@@ -1274,6 +1274,27 @@ Por tanto, no queda publicado para otros equipos de la red. En un despliegue en
 Streamlit Cloud, los archivos se procesan en el servidor del despliegue y deben
 aplicarse las políticas corporativas correspondientes.
 
+### 22.1 Preparación y memoria
+
+Una hoja puede tener pocas filas de datos y millones de celdas vacías guardadas
+únicamente por su formato. Para evitar que se carguen todas al cerrar Estados,
+el sistema revisa secuencialmente las hojas con XML interno de al menos 5 MB.
+Si encuentra 1.000 o más filas finales sin valores ni fórmulas, omite solo esa
+cola en la copia de trabajo. No se aplica un corte fijo a los registros ni se
+sobrescribe el original. Se conservan las filas hasta el último dato o fórmula,
+incluidos ceros, falsos y fórmulas con resultado vacío. La preparación se muestra
+en pantalla y queda registrada en `Auditoria guiada`.
+
+Los CSV se leen directamente en bloques de 50.000 filas. Tras crear el expediente
+correctamente, se liberan las cargas iniciales en memoria de esa sesión y los
+cargadores se reemplazan por sus nombres. Las etapas siguientes usan los eventos
+y datos ya extraídos; no vuelven a solicitar ni a leer el log completo. Para cambiar
+de archivos se debe pulsar `Reiniciar con otros archivos`.
+
+Estos controles reducen el consumo de memoria, pero no cambian las reglas de
+auditoría ni convierten la sesión en almacenamiento persistente. Una interrupción
+del servidor aún puede perder un expediente no descargado.
+
 ## 23. Controles y limitaciones que debe conocer el auditor
 
 1. **La fecha del nombre manda.** Una bitácora bien diligenciada pero mal

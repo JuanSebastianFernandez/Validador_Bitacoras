@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from bitacora import (
     DRAWING_OUTPUT_STATES,
@@ -1461,27 +1462,31 @@ context = current_context()
 current_step = int(st.session_state.get("audit_step", 1)) if context else 0
 with st.sidebar:
     st.header("Expediente de auditoría")
-    workbook_file = st.file_uploader(
-        "1. Bitácora del coordinador",
-        type=["xlsx"],
-        disabled=context is not None,
-        help="El nombre debe contener la fecha DD-MM-AAAA.",
-    )
-    log_file = st.file_uploader(
-        "2. Log del PMS",
-        type=["csv"],
-        disabled=context is not None,
-        help="Debe cubrir la fecha indicada en el nombre de la bitácora.",
-    )
-    request_file = st.file_uploader(
-        "3. Exported Request del PMS",
-        type=["csv"],
-        disabled=context is not None,
-        help=(
-            "Se exige cuando la bitácora contiene Flujo 2.0. Permite validar "
-            "la marca Contract Drawing Completed."
-        ),
-    )
+    if context is None:
+        workbook_file = st.file_uploader(
+            "1. Bitácora del coordinador",
+            type=["xlsx"],
+            help="El nombre debe contener la fecha DD-MM-AAAA.",
+        )
+        log_file = st.file_uploader(
+            "2. Log del PMS",
+            type=["csv"],
+            help="Debe cubrir la fecha indicada en el nombre de la bitácora.",
+        )
+        request_file = st.file_uploader(
+            "3. Exported Request del PMS",
+            type=["csv"],
+            help=(
+                "Se exige cuando la bitácora contiene Flujo 2.0. Permite validar "
+                "la marca Contract Drawing Completed."
+            ),
+        )
+    else:
+        # Do not keep upload widgets (and their large CSV buffers) alive after
+        # initialization. All following steps use the reduced audit context.
+        for label, name in context.get("source_names", {}).items():
+            st.caption(f"{label}: {name}")
+        st.caption("Archivos procesados. La auditoría utiliza únicamente los datos necesarios.")
     export_file = st.file_uploader(
         "4. EXPORT de SAP",
         type=["xlsx"],
@@ -1510,7 +1515,11 @@ with st.sidebar:
 if start:
     try:
         production_date = parse_production_date(workbook_file.name)
-        workbook_bytes, rows = extract_workbook_rows(workbook_file.getvalue())
+        with st.spinner("Preparando el Excel y revisando filas vacías de formato…"):
+            cleanup_entries: list[dict[str, Any]] = []
+            workbook_bytes, rows = extract_workbook_rows(
+                workbook_file, cleanup_entries=cleanup_entries
+            )
         flow20_rows = [row for row in rows if row["sheet"] == SHEET_FLOW20]
         if flow20_rows and request_file is None:
             raise BitacoraError(
@@ -1530,7 +1539,6 @@ if start:
                 else LEGACY_STATES
             )
             allowed_states_by_qr.setdefault(row["qr"], set()).update(states)
-        log_bytes = log_file.getvalue()
         (
             latest_on_day,
             latest_as_of,
@@ -1540,7 +1548,7 @@ if start:
             timelines,
             qr_aliases,
         ) = read_log_validation_data(
-            log_bytes,
+            log_file,
             qrs,
             production_date,
             allowed_states_by_qr=allowed_states_by_qr,
@@ -1560,12 +1568,12 @@ if start:
             if row["sheet"] == SHEET_FLOW20 and row["qr"]
         }
         request_snapshots = (
-            read_request_snapshots(request_file.getvalue(), flow20_qrs)
+            read_request_snapshots(request_file, flow20_qrs)
             if flow20_qrs and request_file is not None
             else {}
         )
         if flow20_qrs:
-            full_flow20_timelines = read_full_log_timelines(log_bytes, flow20_qrs)
+            full_flow20_timelines = read_full_log_timelines(log_file, flow20_qrs)
             for qr in flow20_qrs:
                 timelines[qr] = full_flow20_timelines.get(qr, [])
         validations = validate_rows(
@@ -1581,6 +1589,12 @@ if start:
         st.session_state.audit_context = {
             "production_date": production_date,
             "workbook_name": workbook_file.name,
+            "source_names": {
+                "Bitácora": workbook_file.name,
+                "Log PMS": log_file.name,
+                **({"Exported Request": request_file.name} if request_file else {}),
+            },
+            "workbook_cleanup": cleanup_entries,
             "workbook_bytes": workbook_bytes,
             "validations": validations,
             "latest_on_day": latest_on_day,
@@ -1595,11 +1609,19 @@ if start:
             "unreported_decisions": {},
             "protocol_decisions": {},
             "audit_entries": [
+                *cleanup_entries,
                 *qr_audit_entries,
                 *duplicate_audit_entries,
             ],
         }
         st.session_state.audit_step = 1
+        # Successful initialization is the last use of these raw uploads. The
+        # manager otherwise retains their bytes until the session ends, even if
+        # the widgets disappear. This only clears this session's in-memory files;
+        # SAP is disabled here, and no file on the user's disk is touched.
+        script_context = get_script_run_ctx()
+        if script_context is not None:
+            script_context.uploaded_file_mgr.remove_session_files(script_context.session_id)
         st.rerun()
     except BitacoraError as exc:
         st.error(str(exc))
@@ -1615,6 +1637,12 @@ if context is None:
     st.stop()
 
 step = int(st.session_state.get("audit_step", 1))
+if context.get("workbook_cleanup"):
+    st.info(
+        "Se detectaron filas vacías con formato excesivo y se omitieron en la copia de trabajo. "
+        "No se eliminó ningún registro ni se modificó el archivo original. "
+        "El detalle quedará en Auditoria guiada."
+    )
 render_stepper(step)
 try:
     if step == 1:

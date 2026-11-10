@@ -47,6 +47,23 @@ antes de avanzar:
    y justificación. Cuando hubo soportes manuales agrega además `Soportes protocolos`,
    con la imagen incrustada dentro del mismo libro.
 
+## Uso de memoria con archivos grandes
+
+Antes de iniciar se revisan en streaming las hojas cuyo XML interno supera 5 MB.
+Si una hoja tiene una cola de al menos 1.000 filas finales sin valores ni fórmulas,
+se omite únicamente esa cola en la copia de trabajo. No se corta por un número fijo
+de filas, no se borran registros y no se modifica el archivo subido. Los formatos
+intermedios, fórmulas, valores cero, hojas ocultas y los demás componentes del libro
+se conservan. La preparación se informa en pantalla y en `Auditoria guiada`.
+
+Los CSV se leen en bloques de 50.000 filas, directamente desde el archivo cargado,
+sin construir copias completas adicionales. Una vez iniciado el expediente se
+retiran los cargadores de los archivos iniciales; la barra lateral muestra sus
+nombres y las etapas siguientes usan el contexto reducido. Para cambiar los
+archivos se utiliza **Reiniciar con otros archivos**. No cambian las reglas de
+estados, ciclos, fechas ni cantidades. Esto reduce memoria, pero no elimina los
+límites del servidor ni conserva una auditoría si se pierde la sesión.
+
 ## Regla aplicada
 
 1. La fecha de producción se lee del nombre de la bitácora (`DD-MM-AAAA`).
