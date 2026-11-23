@@ -22,6 +22,9 @@ from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.utils.units import pixels_to_EMU
+from openpyxl.formula import Tokenizer
+from openpyxl.formatting.formatting import ConditionalFormattingList
+from openpyxl.worksheet.cell_range import MultiCellRange
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.utils.cell import get_column_letter, range_boundaries
@@ -3889,7 +3892,7 @@ def _extend_two_row_coded_header(ws, last_column: int) -> bool:
     old_start = code_cell.column
     header_merges = [r for r in ws.merged_cells.ranges if r.max_row <= 2 and r.min_col > 1]
     old_end = max((r.max_col for r in header_merges if r.min_col == old_start), default=old_start)
-    if old_end >= last_column:
+    if old_end == last_column:
         return True
     new_start = last_column - (old_end - old_start)
     delta = new_start - old_start
@@ -3900,8 +3903,9 @@ def _extend_two_row_coded_header(ws, last_column: int) -> bool:
     for merged in header_merges:
         ws.unmerge_cells(str(merged))
     for row in (1, 2):
-        for col in range(old_start, last_column + 1):
+        for col in range(min(old_start, new_start), max(old_end, last_column) + 1):
             ws.cell(row, col).value = None
+            ws.cell(row, col)._style = None
     for (row, col), source in code_cells.items():
         target = ws.cell(row, col + delta)
         _copy_cell_format(source, target)
@@ -4760,6 +4764,90 @@ def _clear_template_values(ws, *, header_row: int, last_row: int, last_column: i
             ws.cell(row, column).value = None
 
 
+def _remove_template_support_columns(ws, *, header_row: int) -> None:
+    """Compact only the data area; the logo/title/code above it stay intact."""
+    headers = _header_map(ws, header_row=header_row)
+    removed = {col for header, col in headers.items() if header in REMOVED_UPLOAD_COLUMNS}
+    if not removed:
+        return
+    kept = [col for col in sorted(headers.values()) if col not in removed]
+    positions = {old: new for new, old in enumerate(kept, 1)}
+    original_dimensions = list(ws.column_dimensions.values())
+    widths = {
+        old: next(
+            (dimension.width for dimension in original_dimensions
+             if dimension.min <= old <= dimension.max),
+            ws.sheet_format.defaultColWidth or 13,
+        )
+        for old in kept
+    }
+    last_column = max(headers.values())
+    for row in range(header_row, ws.max_row + 1):
+        cells = [copy(ws.cell(row, col)) for col in kept]
+        for col, source in enumerate(cells, 1):
+            target = ws.cell(row, col)
+            target.value = source.value
+            _copy_cell_format(source, target)
+            target.comment = copy(source.comment)
+            target.hyperlink = copy(source.hyperlink)
+        for col in range(len(kept) + 1, last_column + 1):
+            ws.cell(row, col).value = None
+            ws.cell(row, col)._style = None
+            ws.cell(row, col).comment = None
+            ws.cell(row, col).hyperlink = None
+    for old, new in positions.items():
+        dimension = ws.column_dimensions[get_column_letter(new)]
+        dimension.min = dimension.max = new
+        dimension.width = widths[old]
+
+    def remap_ranges(ranges) -> MultiCellRange:
+        result = MultiCellRange()
+        for area in ranges:
+            if area.min_row < header_row:
+                result.add(f"{get_column_letter(area.min_col)}{area.min_row}:"
+                           f"{get_column_letter(area.max_col)}{min(area.max_row, header_row - 1)}")
+            if area.max_row >= header_row:
+                for col in range(area.min_col, area.max_col + 1):
+                    if col not in removed:
+                        letter = get_column_letter(positions.get(col, col))
+                        result.add(f"{letter}{max(area.min_row, header_row)}:{letter}{area.max_row}")
+        return result
+
+    def remap_formula(formula: str) -> str:
+        tokens = Tokenizer(formula if formula.startswith("=") else "=" + formula)
+        for token in tokens.items:
+            if token.type != "OPERAND" or token.subtype != "RANGE" or "!" in token.value:
+                continue  # DATOS references and named lists must not move.
+            if not re.fullmatch(r"\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?|\$?[A-Z]{1,3}:\$?[A-Z]{1,3}", token.value):
+                continue
+            def move(match):
+                from openpyxl.utils.cell import column_index_from_string
+                old = column_index_from_string(match.group(2))
+                if old in removed:
+                    return "#REF!"
+                return match.group(1) + get_column_letter(positions.get(old, old))
+            token.value = re.sub(r"(\$?)([A-Z]{1,3})", move, token.value)
+        return ("=" if formula.startswith("=") else "") + "".join(token.value for token in tokens.items)
+
+    validations = []
+    for validation in ws.data_validations.dataValidation:
+        validation.sqref = remap_ranges(validation.sqref.ranges)
+        if validation.sqref:
+            validations.append(validation)
+    ws.data_validations.dataValidation = validations
+    formats = ConditionalFormattingList()
+    for conditional, rules in ws.conditional_formatting._cf_rules.items():
+        ranges = remap_ranges(conditional.sqref.ranges)
+        if not ranges:
+            continue
+        for original in rules:
+            rule = copy(original)
+            rule.formula = [remap_formula(formula) for formula in original.formula]
+            if not any("#REF!" in formula for formula in rule.formula):
+                formats.add(str(ranges), rule)
+    ws.conditional_formatting = formats
+
+
 def _copy_rows_into_template_sheet(
     source_ws,
     target_ws,
@@ -4768,6 +4856,7 @@ def _copy_rows_into_template_sheet(
     key_header: str,
 ) -> None:
     target_header_row = _detect_header_row(target_ws, {key_header})
+    _remove_template_support_columns(target_ws, header_row=target_header_row)
     if source_ws is not None:
         source_header_row = _detect_header_row(source_ws, {key_header})
         source_last_row = _last_data_row(
@@ -4794,16 +4883,13 @@ def _copy_rows_into_template_sheet(
                 header_row=target_header_row,
             )
         )
-        _extend_coded_header_to_last_column(
-            target_ws,
-            max(target_headers.values()),
-        )
     else:
         target_headers = _header_map(target_ws, header_row=target_header_row)
     if not target_headers:
         raise BitacoraError(f"La hoja '{target_ws.title}' de la plantilla no tiene encabezados.")
 
     last_column = max(target_headers.values())
+    _extend_coded_header_to_last_column(target_ws, last_column)
     last_row = _resize_template_data_area(
         target_ws,
         len(source_rows),
@@ -5040,13 +5126,9 @@ def build_upload_workbook(
         sheet: [item for item in validations if item.sheet == sheet]
         for sheet in validation_sheet_names
     }
-    # Coded templates may expose the coordinator's original dates. Keep them
-    # alongside the separate, authoritative PMS datetime columns; do not invent
-    # an ANS calculation or reintroduce the temporary VALIDA/CONFIRMA supports.
-    removed_columns = (
-        REMOVED_UPLOAD_COLUMNS - {"FECHA DE LLEGADA", "FECHA ENTREGADO"}
-        if template_bytes else REMOVED_UPLOAD_COLUMNS
-    )
+    # Only the PMS/audited datetime columns belong to the output. The original
+    # coordinator date columns and CONTROL ANS are neither copied nor calculated.
+    removed_columns = REMOVED_UPLOAD_COLUMNS
 
     table_specs = {
         SHEET_NEW: ("Nuevo", "QR"),
@@ -5065,10 +5147,10 @@ def build_upload_workbook(
             _remove_unvalidated_rows(ws, by_sheet[sheet_name])
         _delete_columns_by_header(ws, removed_columns, header_row=header_row)
 
-    for sheet_name in ("Odm", "Correo-Rotulacion"):
+    for sheet_name in ("Odm", "Correo-Rotulacion", SHEET_PNC):
         if sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
-            header_row = _try_detect_header_row(ws, {"ESTADO DE LA OT"}) or 1
+            header_row = _detect_header_row(ws, {OPERATIONAL_SHEET_KEYS[sheet_name]})
             _delete_columns_by_header(
                 ws,
                 removed_columns,

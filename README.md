@@ -142,8 +142,8 @@ límites del servidor ni conserva una auditoría si se pierde la sesión.
     el EXPORT y reciben las cantidades PEL/TRATAS de todos sus protocolos. Las solicitudes
     en otros estados y las filas con origen `Rotulación` quedan excluidas. Los
     resultados y errores se detallan en `Validacion Correos`.
-16. `PNC` se copia al formato vigente con sus diez columnas, desde `FECHA DE
-    LLEGADA` hasta `FECHA DE REVISIÓN`. Sus registros de origen `Correo` o `PNC`
+16. `PNC` se copia al formato vigente sin la antigua `FECHA DE LLEGADA`, desde
+    `ORIGEN DE ACTUALIZACIÓN` hasta `FECHA DE REVISIÓN`. Sus registros de origen `Correo` o `PNC`
     no participan todavía en la validación de estados, casos no reportados ni
     cantidades P/TRATA.
 
@@ -192,13 +192,14 @@ ni cargar el formato o el logo en cada auditoría.
 
 La plantilla conserva su diseño de dos filas de encabezado corporativo y los
 encabezados de datos en la fila 3. Ya incluye `Flujo 2.0`; no se reconstruye desde
-otra hoja. Se conservan las fechas originales del coordinador y se agregan, al
-final de cada flujo, las fechas/horas exactas obtenidas de PMS. En Flujo 2.0 son
+otra hoja. Se omiten `FECHA DE LLEGADA`, `FECHA ENTREGADO` y `CONTROL ANS` en todas
+las hojas operativas y se agregan al final de cada flujo las fechas/horas exactas
+obtenidas de PMS. En Flujo 2.0 son
 tres hitos: llegada, ODM y dibujo. El código, versión y clasificación
 `BV_C2.2_Contractual` se mantienen y el recuadro se extiende hasta el nuevo borde
-derecho. `CONTROL ANS` se conserva como columna del formato, sin calcular un ANS.
-Se mantienen las listas desplegables de la plantilla, convirtiendo sus reglas
-extendidas de Excel al esquema estándar sin cambiar opciones ni rangos.
+derecho. No se copia ni se calcula la columna antigua `CONTROL ANS`.
+Se mantienen las opciones de las listas desplegables de la plantilla y se ajustan
+sus rangos y los formatos condicionales a la nueva posición de las columnas.
 
 ## Despliegue en Streamlit Community Cloud
 

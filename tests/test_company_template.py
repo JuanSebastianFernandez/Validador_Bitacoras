@@ -69,17 +69,18 @@ def test_new_company_output_preserves_layout_and_typed_dates():
     output = sample_output()
     original = load_workbook(BytesIO(b.default_template_bytes()))
     wb = load_workbook(BytesIO(output))
-    expected = [(b.SHEET_NEW, 17, "Nuevo"), (b.SHEET_OLD, 18, "Viejo"), (b.SHEET_FLOW20, 20, "Flujo20")]
+    expected = [(b.SHEET_NEW, 14, "Nuevo"), (b.SHEET_OLD, 15, "Viejo"), (b.SHEET_FLOW20, 17, "Flujo20")]
+    original_code_cols = {b.SHEET_NEW: 15, b.SHEET_OLD: 16, b.SHEET_FLOW20: 17}
     for name, last_col, table in expected:
         ws = wb[name]
         code = ws.cell(1, last_col)
-        assert code.value == original[name].cell(1, last_col - (3 if name == b.SHEET_FLOW20 else 2)).value
+        assert code.value == original[name].cell(1, original_code_cols[name]).value
         assert code.value.startswith(b.TEMPLATE_CODE)
         assert ws.cell(2, last_col).value == "BV_C2.2_Contractual"
         assert ws["B1"].value == original[name]["B1"].value
         assert copy(ws["B1"].font) == copy(original[name]["B1"].font)
-        assert copy(ws["C3"].fill) == copy(original[name]["C3"].fill)
-        assert ws["C4"].value in {"QR-N", "QR-V", "QR-20"}
+        assert copy(ws["B3"].fill) == copy(original[name]["C3"].fill)
+        assert ws["B4"].value in {"QR-N", "QR-V", "QR-20"}
         assert ws.tables[table].ref.startswith("A3:")
         assert ws.print_title_rows == "$1:$3"
         assert "A1:A2" in {str(r) for r in ws.merged_cells.ranges}
@@ -87,13 +88,11 @@ def test_new_company_output_preserves_layout_and_typed_dates():
             col = b._header_map(ws, 3)[b.normalize_header(header)]
             assert isinstance(ws.cell(4, col).value, datetime)
             assert ws.cell(4, col).number_format == b.EXCEL_DATETIME_FORMAT
-    assert wb[b.SHEET_NEW]["A4"].value == datetime(2026, 11, 23)
-    assert wb[b.SHEET_NEW]["H4"].value == datetime(2026, 11, 23)
-    assert wb[b.SHEET_NEW]["L4"].value == "3;0"
-    assert wb[b.SHEET_NEW]["M4"].value == "0;2"
-    assert wb[b.SHEET_NEW]["N4"].value == 5
-    assert wb[b.SHEET_FLOW20]["K4"].value == "ODM-20"
-    assert wb[b.SHEET_FLOW20]["G4"].value == b.FLOW20_SECONDARY_COMPLETED
+    assert wb[b.SHEET_NEW]["J4"].value == "3;0"
+    assert wb[b.SHEET_NEW]["K4"].value == "0;2"
+    assert wb[b.SHEET_NEW]["L4"].value == 5
+    assert wb[b.SHEET_FLOW20]["I4"].value == "ODM-20"
+    assert wb[b.SHEET_FLOW20]["F4"].value == b.FLOW20_SECONDARY_COMPLETED
     for name in ("Correo-Rotulacion", "Odm", "PNC"):
         assert b._detect_header_row(wb[name], {b.OPERATIONAL_SHEET_KEYS[name]}) == 3
         assert wb[name]["B1"].value == original[name]["B1"].value
@@ -149,10 +148,10 @@ def test_template_dropdowns_are_not_lost_on_import():
     with zipfile.ZipFile(BytesIO(b.default_template_bytes())) as original:
         for name, path in _sheet_paths(original).items():
             expected = []
+            # Only sheet data columns shift; lists still point to the same DATOS cells.
             for rule in ET.fromstring(original.read(path)).iter(f"{{{X14_NS}}}dataValidation"):
-                expected.append((rule.findtext(f"{{{XM_NS}}}sqref"), rule.attrib["type"],
-                                 rule.findtext(f"{{{X14_NS}}}formula1/{{{XM_NS}}}f")))
-            actual = {(str(v.sqref), v.type, v.formula1) for v in wb[name].data_validations.dataValidation}
+                expected.append((rule.attrib["type"], rule.findtext(f"{{{X14_NS}}}formula1/{{{XM_NS}}}f")))
+            actual = {(v.type, v.formula1) for v in wb[name].data_validations.dataValidation}
             assert set(expected).issubset(actual), name
     wb.close()
 
@@ -161,9 +160,9 @@ def test_new_template_keeps_empty_flow20_coded_for_old_input():
     source, rows = b.extract_workbook_rows(make_workbook())
     output = b.build_upload_workbook(source, b.validate_rows(rows, {}, {}), template_bytes=b.default_template_bytes())
     wb = load_workbook(BytesIO(output))
-    assert wb[b.SHEET_FLOW20]["T1"].value.startswith(b.TEMPLATE_CODE)
-    assert wb[b.SHEET_FLOW20]["C4"].value is None
-    assert wb[b.SHEET_FLOW20].tables["Flujo20"].ref == "A3:T4"
+    assert wb[b.SHEET_FLOW20]["Q1"].value.startswith(b.TEMPLATE_CODE)
+    assert wb[b.SHEET_FLOW20]["B4"].value is None
+    assert wb[b.SHEET_FLOW20].tables["Flujo20"].ref == "A3:Q4"
     wb.close()
 
 
@@ -183,8 +182,47 @@ def test_input_can_already_use_the_new_coded_format():
     validations = [replace(v, result=b.STATUS_MATCH) for v in b.validate_rows(rows, {}, {})]
     output = b.build_upload_workbook(prepared, validations, template_bytes=b.default_template_bytes())
     wb = load_workbook(BytesIO(output))
-    assert wb[b.SHEET_NEW]["C4"].value == "QR-CODIFICADO"
-    assert wb[b.SHEET_NEW]["A4"].value == datetime(2026, 11, 23)
-    assert wb[b.SHEET_NEW]["A4"].number_format == "dd/mm/yyyy"
-    assert wb[b.SHEET_NEW]["Q1"].value.startswith(b.TEMPLATE_CODE)
+    assert wb[b.SHEET_NEW]["B4"].value == "QR-CODIFICADO"
+    assert "FECHA DE LLEGADA" not in b._header_map(wb[b.SHEET_NEW], 3)
+    assert wb[b.SHEET_NEW]["N1"].value.startswith(b.TEMPLATE_CODE)
     wb.close()
+
+
+def test_coordinator_support_columns_are_removed_from_every_operational_output():
+    wb = load_workbook(BytesIO(sample_output()))
+    for name, key in b.OPERATIONAL_SHEET_KEYS.items():
+        headers = b._header_map(wb[name], b._detect_header_row(wb[name], {key}))
+        assert not set(headers) & b.REMOVED_UPLOAD_COLUMNS, name
+        assert headers[key] >= 1
+        # The code box remains in the printed table, even when it moves left.
+        assert any(b.normalize_header(wb[name].cell(1, col).value).startswith(b.TEMPLATE_CODE)
+                   for col in range(1, max(headers.values()) + 1)), name
+    assert b.normalize_header(b.ARRIVAL_DATETIME_HEADER) in b._header_map(wb[b.SHEET_NEW], 3)
+    assert "FECHA DE REVISION" in b._header_map(wb[b.SHEET_PNC], 3)
+    wb.close()
+
+
+def test_column_compaction_moves_dropdowns_and_conditional_format_references():
+    from openpyxl import Workbook
+    from openpyxl.formatting.rule import FormulaRule
+    from openpyxl.worksheet.datavalidation import DataValidation
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["FECHA DE LLEGADA", "ORIGEN DE ACTUALIZACION", "QR", "ESTADO DE LA OT", "FECHA ENTREGADO", "CONTROL ANS"])
+    ws.append([datetime(2026, 11, 23), "PQRs", "QR-1", "drawing_review", datetime(2026, 11, 23), "Ignorar"])
+    ws.column_dimensions.group("B", "D", hidden=False)
+    ws.column_dimensions["B"].width = 24
+    ws.add_data_validation(DataValidation(type="list", formula1="DATOS!$C$2:$C$19", sqref="B2:B100"))
+    ws.conditional_formatting.add("D2:D100", FormulaRule(formula=['$D2="drawing_review"']))
+    ws.conditional_formatting.add("F2:F100", FormulaRule(formula=['F2="Vencido"']))
+    b._remove_template_support_columns(ws, header_row=1)
+    assert ws["B2"].value == "QR-1"
+    assert ws["C2"].value == "drawing_review"
+    assert all(ws.column_dimensions[col].width == 24 for col in ("A", "B", "C"))
+    validation = ws.data_validations.dataValidation[0]
+    assert str(validation.sqref) == "A2:A100"
+    assert validation.formula1 == "DATOS!$C$2:$C$19"
+    assert len(ws.conditional_formatting) == 1
+    conditional, rules = next(iter(ws.conditional_formatting._cf_rules.items()))
+    assert str(conditional.sqref) == "C2:C100"
+    assert rules[0].formula == ['$C2="drawing_review"']

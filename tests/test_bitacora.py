@@ -1565,8 +1565,8 @@ def test_coded_template_output_uses_hseq_structure():
     assert ws_old["B6"].value is None
 
     ws_pnc = wb["PNC"]
-    assert ws_pnc.tables["Tabla4"].ref == "A5:J6"
-    assert ws_pnc["C6"].value is None
+    assert ws_pnc.tables["Tabla4"].ref == "A5:I6"
+    assert ws_pnc["B6"].value is None
 
     ws_result = wb["Resultado Validacion"]
     assert wb.sheetnames[-3:] == [
@@ -1793,19 +1793,18 @@ def test_operational_noise_is_removed_from_all_five_sheets_without_touching_form
     assert ws_email["M6"].value == '=IF(COUNTA(K6:L6)=0,"",SUM(K6:L6))'
 
     ws_pnc = wb["PNC"]
-    assert ws_pnc.tables["Tabla4"].ref == "A5:J7"
-    assert ws_pnc["A6"].value == datetime(2026, 8, 10)
-    assert ws_pnc["B6"].value == "PNC"
-    assert ws_pnc["C6"].value == "QR-PNC-1"
+    assert ws_pnc.tables["Tabla4"].ref == "A5:I7"
+    assert ws_pnc["A6"].value == "PNC"
+    assert ws_pnc["B6"].value == "QR-PNC-1"
+    assert ws_pnc["C6"].value is None
     assert ws_pnc["D6"].value is None
     assert ws_pnc["E6"].value is None
     assert ws_pnc["F6"].value is None
-    assert ws_pnc["G6"].value is None
-    assert ws_pnc["H6"].value == "Concepto con 0 válido"
-    assert ws_pnc["I6"].value is None
-    assert ws_pnc["J6"].value == datetime(2026, 8, 11)
-    assert ws_pnc["B7"].value == "Correo"
-    assert ws_pnc["C7"].value == "ASUNTO-PNC-2"
+    assert ws_pnc["G6"].value == "Concepto con 0 válido"
+    assert ws_pnc["H6"].value is None
+    assert ws_pnc["I6"].value == datetime(2026, 8, 11)
+    assert ws_pnc["A7"].value == "Correo"
+    assert ws_pnc["B7"].value == "ASUNTO-PNC-2"
 
 
 def test_operational_cleaning_ignores_thousands_of_trailing_formatted_rows():

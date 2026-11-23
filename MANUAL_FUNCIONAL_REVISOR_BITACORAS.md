@@ -231,10 +231,10 @@ La plantilla aporta:
 
 Los datos comienzan debajo de la fila 3. Las primeras dos filas contienen el logo,
 el título y la codificación. La fecha de edición del formato no se reemplaza por
-la fecha de producción. Las fechas originales del coordinador se mantienen,
-separadas de las columnas de fecha/hora PMS que agrega el sistema.
-`CONTROL ANS` se conserva como columna del diseño, sin reintroducir las fórmulas
-de ANS del archivo de entrada ni calcular aquí ese indicador.
+la fecha de producción. Se eliminan de todas las hojas operativas las columnas
+antiguas `FECHA DE LLEGADA`, `FECHA ENTREGADO` y `CONTROL ANS`. Solo se conservan
+las columnas de fecha/hora PMS que agrega el sistema (y la `FECHA DE REVISIÓN`
+propia de PNC). No se copian las fórmulas de ANS del archivo de entrada.
 Las listas desplegables de la plantilla se conservan con sus mismas referencias
 a `DATOS`; las reglas extendidas de Excel se trasladan a validaciones estándar.
 
@@ -1066,7 +1066,7 @@ En `OBSERVACIONES` también se retiran marcadores aislados:
 - `SM`.
 
 En `PNC` esa limpieza ampliada se aplica a toda la hoja. La hoja PNC se copia con
-su información desde `FECHA DE LLEGADA` hasta `FECHA DE REVISIÓN`, pero todavía
+su información desde `ORIGEN DE ACTUALIZACIÓN` hasta `FECHA DE REVISIÓN`, pero todavía
 no participa en las reglas de estados ni protocolos.
 
 También se eliminan del formato de cargue las columnas auxiliares antiguas:
