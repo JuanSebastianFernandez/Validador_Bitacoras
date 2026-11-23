@@ -19,9 +19,13 @@ from typing import Any, BinaryIO, Iterable
 import pandas as pd
 from openpyxl import Workbook, load_workbook
 from openpyxl.drawing.image import Image as OpenpyxlImage
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+from openpyxl.drawing.xdr import XDRPositiveSize2D
+from openpyxl.utils.units import pixels_to_EMU
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.utils.cell import get_column_letter, range_boundaries
+from template_drawings import restore_template_data_validations, restore_template_vector_logos
 
 
 SHEET_NEW = "Flujo Nuevo"
@@ -34,23 +38,14 @@ SHEET_UNREPORTED = "Casos no reportados"
 SHEET_GUIDED_AUDIT = "Auditoria guiada"
 SHEET_PROTOCOL_EVIDENCE = "Soportes protocolos"
 TEMPLATE_HEADER_ROW = 5
+TEMPLATE_CODE = "F-IND-ENEL-AGP-002"
+TEMPLATE_NAME = "F-IND-ENEL-AGP-002_Ver_1_Bitácora seguimiento gestión.xlsx"
 BUNDLED_TEMPLATE_PATH = (
     Path(__file__).resolve().parent
     / "assets"
-    / "F-AGP-04 Formato Bitacora Seguimiento Gestion.xlsx"
+    / TEMPLATE_NAME
 )
-LEGACY_TEMPLATE_PATH = Path(
-    r"G:\.shortcut-targets-by-id\1CCgtZ-LFgl_wQdmd3LuIRjEtOZJYvRlI"
-    r"\20_ENEL_AGP\AGP #2 - JA10161530\08_HSEQ\HSE 2026"
-    r"\1. Gestión documental\1.2 Formatos de proyecto"
-    r"\F-AGP-04 Formato Bitacora Seguimiento Gestión.xlsx"
-)
-FALLBACK_LOGO_PATH = (
-    Path(__file__).resolve().parent
-    / "tmp"
-    / "inspection"
-    / "logo_extracted.png"
-)
+BUNDLED_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "bureau_veritas_logo.png"
 CODED_HEADER_SHEETS = (
     SHEET_NEW,
     SHEET_OLD,
@@ -3882,8 +3877,54 @@ def _ensure_flow20_timing_columns(ws, *, header_row: int) -> dict[str, int]:
     )
 
 
+def _extend_two_row_coded_header(ws, last_column: int) -> bool:
+    """Keep the new B1:title and right-hand code box aligned with added dates."""
+    code_cell = next(
+        (cell for row in ws.iter_rows(min_row=1, max_row=2) for cell in row
+         if normalize_header(cell.value).startswith(TEMPLATE_CODE)),
+        None,
+    )
+    if code_cell is None:
+        return False
+    old_start = code_cell.column
+    header_merges = [r for r in ws.merged_cells.ranges if r.max_row <= 2 and r.min_col > 1]
+    old_end = max((r.max_col for r in header_merges if r.min_col == old_start), default=old_start)
+    if old_end >= last_column:
+        return True
+    new_start = last_column - (old_end - old_start)
+    delta = new_start - old_start
+    code_cells = {
+        (row, col): copy(ws.cell(row, col))
+        for row in (1, 2) for col in range(old_start, old_end + 1)
+    }
+    for merged in header_merges:
+        ws.unmerge_cells(str(merged))
+    for row in (1, 2):
+        for col in range(old_start, last_column + 1):
+            ws.cell(row, col).value = None
+    for (row, col), source in code_cells.items():
+        target = ws.cell(row, col + delta)
+        _copy_cell_format(source, target)
+        target.value = source.value
+        old_width = ws.column_dimensions[get_column_letter(col)].width
+        dimension = ws.column_dimensions[get_column_letter(col + delta)]
+        dimension.width = max(dimension.width or 0, old_width or 0)
+    for merged in header_merges:
+        min_col, max_col = merged.min_col, merged.max_col
+        if min_col >= old_start:
+            min_col += delta
+            max_col += delta
+        elif max_col == old_start - 1:
+            max_col = new_start - 1
+        ws.merge_cells(start_row=merged.min_row, end_row=merged.max_row,
+                       start_column=min_col, end_column=max_col)
+    return True
+
+
 def _extend_coded_header_to_last_column(ws, last_column: int) -> None:
-    """Move the F-AGP-04 code box so it still closes the widened table."""
+    """Extend the supplied code box/title without changing its document identity."""
+    if _extend_two_row_coded_header(ws, last_column):
+        return
     code_cell = next(
         (
             cell
@@ -4609,12 +4650,10 @@ def _add_protocol_evidence_sheet(
 
 
 def default_template_bytes() -> bytes | None:
-    for path in (BUNDLED_TEMPLATE_PATH, LEGACY_TEMPLATE_PATH):
-        try:
-            if path.exists():
-                return path.read_bytes()
-        except OSError:
-            continue
+    try:
+        return BUNDLED_TEMPLATE_PATH.read_bytes()
+    except OSError:
+        pass
     return None
 
 
@@ -4635,16 +4674,23 @@ def _extract_template_logo_bytes(template_bytes: bytes) -> bytes | None:
         return None
 
 
-def _add_oca_logos_from_template(wb, template_bytes: bytes) -> None:
-    logo_bytes = _extract_template_logo_bytes(template_bytes)
-    if not logo_bytes:
+def _add_template_raster_logos(wb, template_bytes: bytes) -> set[str]:
+    new_company_template = any(
+        normalize_header(cell.value).startswith(TEMPLATE_CODE)
+        for ws in wb.worksheets for row in ws.iter_rows(min_row=1, max_row=2) for cell in row
+    )
+    logo_bytes = None
+    if new_company_template:
         try:
-            logo_bytes = FALLBACK_LOGO_PATH.read_bytes()
+            logo_bytes = BUNDLED_LOGO_PATH.read_bytes()
         except OSError:
-            logo_bytes = None
+            pass  # The original vector logo remains a lossless fallback.
     if not logo_bytes:
-        return
+        logo_bytes = _extract_template_logo_bytes(template_bytes)
+    if not logo_bytes:
+        return set()
 
+    restored_sheets: set[str] = set()
     for sheet_name in CODED_HEADER_SHEETS:
         if sheet_name not in wb.sheetnames:
             continue
@@ -4652,9 +4698,28 @@ def _add_oca_logos_from_template(wb, template_bytes: bytes) -> None:
         ws._images = []
         ws["A1"].value = None
         image = OpenpyxlImage(BytesIO(logo_bytes))
-        image.width = LOGO_WIDTH_PX
-        image.height = LOGO_HEIGHT_PX
-        ws.add_image(image, "A1")
+        if new_company_template:
+            # Fit the supplied transparent PNG into A1:A2 without stretching.
+            available_width = (ws.column_dimensions["A"].width or 13) * 7 + 5
+            available_height = sum(
+                ws.row_dimensions[row].height or ws.sheet_format.defaultRowHeight or 15
+                for row in (1, 2)
+            ) * 4 / 3
+            scale = min((available_width - 12) / image.width, (available_height - 12) / image.height)
+            image.width, image.height = image.width * scale, image.height * scale
+            image.anchor = OneCellAnchor(
+                _from=AnchorMarker(col=0, row=0,
+                                   colOff=pixels_to_EMU((available_width - image.width) / 2),
+                                   rowOff=pixels_to_EMU((available_height - image.height) / 2)),
+                ext=XDRPositiveSize2D(cx=pixels_to_EMU(image.width), cy=pixels_to_EMU(image.height)),
+            )
+            ws.add_image(image)
+        else:
+            image.width = LOGO_WIDTH_PX
+            image.height = LOGO_HEIGHT_PX
+            ws.add_image(image, "A1")
+        restored_sheets.add(sheet_name)
+    return restored_sheets
 
 
 def _sheet_rows_by_header(
@@ -4702,6 +4767,7 @@ def _copy_rows_into_template_sheet(
     table_name: str,
     key_header: str,
 ) -> None:
+    target_header_row = _detect_header_row(target_ws, {key_header})
     if source_ws is not None:
         source_header_row = _detect_header_row(source_ws, {key_header})
         source_last_row = _last_data_row(
@@ -4720,12 +4786,12 @@ def _copy_rows_into_template_sheet(
         target_headers = (
             _ensure_flow20_timing_columns(
                 target_ws,
-                header_row=TEMPLATE_HEADER_ROW,
+                header_row=target_header_row,
             )
             if target_ws.title == SHEET_FLOW20
             else _ensure_timing_columns(
                 target_ws,
-                header_row=TEMPLATE_HEADER_ROW,
+                header_row=target_header_row,
             )
         )
         _extend_coded_header_to_last_column(
@@ -4733,7 +4799,7 @@ def _copy_rows_into_template_sheet(
             max(target_headers.values()),
         )
     else:
-        target_headers = _header_map(target_ws, header_row=TEMPLATE_HEADER_ROW)
+        target_headers = _header_map(target_ws, header_row=target_header_row)
     if not target_headers:
         raise BitacoraError(f"La hoja '{target_ws.title}' de la plantilla no tiene encabezados.")
 
@@ -4741,30 +4807,30 @@ def _copy_rows_into_template_sheet(
     last_row = _resize_template_data_area(
         target_ws,
         len(source_rows),
-        header_row=TEMPLATE_HEADER_ROW,
+        header_row=target_header_row,
     )
 
-    style_row = TEMPLATE_HEADER_ROW + 1
-    for row in range(TEMPLATE_HEADER_ROW + 1, last_row + 1):
+    style_row = target_header_row + 1
+    for row in range(target_header_row + 1, last_row + 1):
         target_ws.row_dimensions[row].height = target_ws.row_dimensions[style_row].height
         for column in range(1, last_column + 1):
             _copy_cell_format(target_ws.cell(style_row, column), target_ws.cell(row, column))
 
     _clear_template_values(
         target_ws,
-        header_row=TEMPLATE_HEADER_ROW,
+        header_row=target_header_row,
         last_row=last_row,
         last_column=last_column,
     )
 
     for offset, record in enumerate(source_rows, start=1):
-        target_row = TEMPLATE_HEADER_ROW + offset
+        target_row = target_header_row + offset
         for header, target_column in target_headers.items():
             target_ws.cell(target_row, target_column).value = record.get(header)
 
     observation_col = target_headers.get("OBSERVACIONES")
     if observation_col:
-        for row in range(TEMPLATE_HEADER_ROW + 1, last_row + 1):
+        for row in range(target_header_row + 1, last_row + 1):
             cell = target_ws.cell(row, observation_col)
             alignment = copy(cell.alignment)
             alignment.wrap_text = True
@@ -4772,6 +4838,24 @@ def _copy_rows_into_template_sheet(
             cell.alignment = alignment
             if normalize_text(cell.value):
                 target_ws.row_dimensions[row].height = 72
+
+    secondary_col = target_headers.get("ESTADO SECUNDARIO")
+    if secondary_col:
+        for row in range(target_header_row + 1, last_row + 1):
+            cell = target_ws.cell(row, secondary_col)
+            if len(normalize_text(cell.value)) > 20:
+                alignment = copy(cell.alignment)
+                alignment.wrap_text = True
+                cell.alignment = alignment
+                target_ws.row_dimensions[row].height = max(target_ws.row_dimensions[row].height or 15, 36)
+    for header in ("FECHA DE LLEGADA", "FECHA ENTREGADO", "FECHA DE REVISION"):
+        column = target_headers.get(header)
+        if column:
+            for row in range(target_header_row + 1, last_row + 1):
+                cell = target_ws.cell(row, column)
+                if isinstance(cell.value, (date, datetime)):
+                    has_time = isinstance(cell.value, datetime) and cell.value.time() != datetime.min.time()
+                    cell.number_format = EXCEL_DATETIME_FORMAT if has_time else "dd/mm/yyyy"
 
     sheet_timing_headers = (
         FLOW20_TIMING_HEADERS
@@ -4781,30 +4865,26 @@ def _copy_rows_into_template_sheet(
     for timing_header in sheet_timing_headers:
         timing_col = target_headers.get(normalize_header(timing_header))
         if timing_col:
-            for row in range(TEMPLATE_HEADER_ROW + 1, last_row + 1):
+            for row in range(target_header_row + 1, last_row + 1):
                 target_ws.cell(row, timing_col).number_format = EXCEL_DATETIME_FORMAT
 
     actual_last_row = _last_data_row(
         target_ws,
         key_header,
-        header_row=TEMPLATE_HEADER_ROW,
+        header_row=target_header_row,
     )
-    if actual_last_row == TEMPLATE_HEADER_ROW:
-        actual_last_row = TEMPLATE_HEADER_ROW + 1
-    _set_total_formulas(target_ws, actual_last_row, header_row=TEMPLATE_HEADER_ROW)
+    if actual_last_row == target_header_row:
+        actual_last_row = target_header_row + 1
+    _set_total_formulas(target_ws, actual_last_row, header_row=target_header_row)
     _rebuild_table(
         target_ws,
         table_name,
         last_column,
         actual_last_row,
-        header_row=TEMPLATE_HEADER_ROW,
+        header_row=target_header_row,
     )
-    if target_ws.title in {SHEET_NEW, SHEET_OLD, SHEET_FLOW20}:
-        from openpyxl.utils import get_column_letter
-
-        target_ws.print_area = (
-            f"A1:{get_column_letter(last_column)}{actual_last_row}"
-        )
+    target_ws.print_area = f"A1:{get_column_letter(last_column)}{actual_last_row}"
+    target_ws.print_title_rows = f"1:{target_header_row}"
 
 
 def _ensure_flow20_template_sheet(wb) -> None:
@@ -4812,7 +4892,7 @@ def _ensure_flow20_template_sheet(wb) -> None:
         return
     if SHEET_OLD not in wb.sheetnames:
         raise BitacoraError(
-            "La plantilla F-AGP-04 no contiene una base para crear Flujo 2.0."
+            "La plantilla codificada no contiene una base para crear Flujo 2.0."
         )
     ws = wb.copy_worksheet(wb[SHEET_OLD])
     ws.title = SHEET_FLOW20
@@ -4863,7 +4943,9 @@ def _build_from_coded_template(
     try:
         wb = load_workbook(BytesIO(template_bytes), data_only=False)
     except Exception as exc:
-        raise BitacoraError("No pude abrir la plantilla F-AGP-04.") from exc
+        raise BitacoraError("No pude abrir la plantilla codificada de salida.") from exc
+
+    restore_template_data_validations(wb, template_bytes)
 
     if SHEET_FLOW20 in source_wb.sheetnames:
         _ensure_flow20_template_sheet(wb)
@@ -4875,7 +4957,7 @@ def _build_from_coded_template(
         "Correo-Rotulacion": ("Correos", "ASUNTO"),
         SHEET_PNC: ("Tabla4", "QR/ASUNTO"),
     }
-    if SHEET_FLOW20 in source_wb.sheetnames:
+    if SHEET_FLOW20 in wb.sheetnames:
         sheet_specs[SHEET_FLOW20] = ("Flujo20", "QR")
 
     missing_template_sheets = [
@@ -4883,7 +4965,7 @@ def _build_from_coded_template(
     ]
     if missing_template_sheets:
         raise BitacoraError(
-            "La plantilla F-AGP-04 no contiene las hojas requeridas: "
+            "La plantilla codificada no contiene las hojas requeridas: "
             + ", ".join(missing_template_sheets)
             + "."
         )
@@ -4911,7 +4993,7 @@ def _build_from_coded_template(
     if audit_entries is not None:
         _add_guided_audit_sheet(wb, audit_entries)
     _add_protocol_evidence_sheet(wb, protocol_evidence or [])
-    _add_oca_logos_from_template(wb, template_bytes)
+    raster_logo_sheets = _add_template_raster_logos(wb, template_bytes)
 
     try:
         wb.calculation.fullCalcOnLoad = True
@@ -4923,7 +5005,13 @@ def _build_from_coded_template(
     output = BytesIO()
     wb.save(output)
     wb.close()
-    return output.getvalue()
+    try:
+        return restore_template_vector_logos(
+            output.getvalue(), template_bytes,
+            tuple(sheet for sheet in CODED_HEADER_SHEETS if sheet not in raster_logo_sheets),
+        )
+    except Exception as exc:
+        raise BitacoraError("No pude conservar los logos vectoriales de la plantilla de salida.") from exc
 
 
 def build_upload_workbook(
@@ -4952,6 +5040,13 @@ def build_upload_workbook(
         sheet: [item for item in validations if item.sheet == sheet]
         for sheet in validation_sheet_names
     }
+    # Coded templates may expose the coordinator's original dates. Keep them
+    # alongside the separate, authoritative PMS datetime columns; do not invent
+    # an ANS calculation or reintroduce the temporary VALIDA/CONFIRMA supports.
+    removed_columns = (
+        REMOVED_UPLOAD_COLUMNS - {"FECHA DE LLEGADA", "FECHA ENTREGADO"}
+        if template_bytes else REMOVED_UPLOAD_COLUMNS
+    )
 
     table_specs = {
         SHEET_NEW: ("Nuevo", "QR"),
@@ -4968,7 +5063,7 @@ def build_upload_workbook(
         header_row = _detect_header_row(ws, {"QR", "ESTADO DE LA OT"})
         if matches_only:
             _remove_unvalidated_rows(ws, by_sheet[sheet_name])
-        _delete_columns_by_header(ws, REMOVED_UPLOAD_COLUMNS, header_row=header_row)
+        _delete_columns_by_header(ws, removed_columns, header_row=header_row)
 
     for sheet_name in ("Odm", "Correo-Rotulacion"):
         if sheet_name in wb.sheetnames:
@@ -4976,7 +5071,7 @@ def build_upload_workbook(
             header_row = _try_detect_header_row(ws, {"ESTADO DE LA OT"}) or 1
             _delete_columns_by_header(
                 ws,
-                REMOVED_UPLOAD_COLUMNS,
+                removed_columns,
                 header_row=header_row,
             )
 

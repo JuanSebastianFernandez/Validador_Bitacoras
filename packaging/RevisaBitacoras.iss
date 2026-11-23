@@ -1,6 +1,6 @@
 #define MyAppName "Revisor de Bitácoras"
 #define MyAppVersion "1.0.1"
-#define MyAppPublisher "OCA Global - AGP"
+#define MyAppPublisher "AGP"
 #define MyAppExeName "RevisaBitacoras.exe"
 
 [Setup]

@@ -5,7 +5,8 @@ Aplicación Streamlit para validar y completar las hojas **Flujo Nuevo**,
 `exported-logs.csv` del PMS para estados y devoluciones, el
 `exported-request.csv` para confirmar `Contract Drawing Completed` en Flujo 2.0
 y el `EXPORT_*.xlsx` de SAP para las cantidades P/TRATAS.
-El archivo final se devuelve codificado con la plantilla HSEQ/SIG **F-AGP-04**,
+El archivo final se devuelve codificado con la plantilla **F-IND-ENEL-AGP-002,
+versión 1 (Oct./26)** de Bureau Veritas,
 incluida en `assets/` para que funcione tanto localmente como en Streamlit Cloud.
 La hoja `PNC` se conserva como registro operativo, se limpia y se traslada a la
 plantilla codificada sin validaciones adicionales por ahora.
@@ -100,7 +101,7 @@ límites del servidor ni conserva una auditoría si se pierde la sesión.
    el sistema corrige el QR antes de validar y deja la modificación en la auditoría.
    No corrige si el QR exacto aparece en cualquier parte del log o si encuentra
    más de una variante posible.
-7. Las filas válidas se copian a la plantilla fija codificada `F-AGP-04`.
+7. Las filas válidas se copian a la plantilla fija codificada `F-IND-ENEL-AGP-002`.
 8. El mismo Excel agrega al final la hoja `Resultado Validacion` con el detalle de
    coincidencias, diferencias, cantidades, devoluciones y trazabilidad temporal.
    Las hojas `Flujo Nuevo` y `Flujo Viejo` reciben las columnas
@@ -116,7 +117,10 @@ límites del servidor ni conserva una auditoría si se pierde la sesión.
    identifica desde `username` o `user_created_last_name` por cédula, cédula con
    prefijo `CO` o nombre sin depender del orden, puntos, tildes o mayúsculas. Los
    estados de devolución no llevan este filtro de profesional.
-10. El logo OCA Global se re-inserta desde la plantilla en los encabezados codificados.
+10. El PNG transparente de Bureau Veritas incluido en `assets/bureau_veritas_logo.png`
+    se inserta centrado en `A1:A2` sin deformarlo ni cambiar sus tonos grises.
+    Si no está disponible, se conservan las formas vectoriales originales de la
+    plantilla. No se reutiliza un logo de OCA como respaldo.
 11. Para `2.7-Dibujo finalizado`, `drawing_review` y los casos de `Flujo 2.0`
    con estado secundario `ODM_Creada-Dibujo_Finalizado`, se buscan los protocolos
    en `Sheet1` del EXPORT y se cuentan los `GIS_GUID` únicos por tipo `P` y `T`.
@@ -138,7 +142,7 @@ límites del servidor ni conserva una auditoría si se pierde la sesión.
     el EXPORT y reciben las cantidades PEL/TRATAS de todos sus protocolos. Las solicitudes
     en otros estados y las filas con origen `Rotulación` quedan excluidas. Los
     resultados y errores se detallan en `Validacion Correos`.
-16. `PNC` se copia al formato F-AGP-04 con sus diez columnas, desde `FECHA DE
+16. `PNC` se copia al formato vigente con sus diez columnas, desde `FECHA DE
     LLEGADA` hasta `FECHA DE REVISIÓN`. Sus registros de origen `Correo` o `PNC`
     no participan todavía en la validación de estados, casos no reportados ni
     cantidades P/TRATA.
@@ -183,13 +187,23 @@ bitácora contiene `Flujo 2.0`, exige además `exported-request.csv`. El
 el listado depurado. Su cargador permanece bloqueado durante el inicio y las etapas
 1 y 2, se habilita exclusivamente en la etapa 3 y vuelve a bloquearse al cerrar las
 cantidades. Acepta CSV grandes (hasta 500 MB), procesa el log por bloques y
-toma automáticamente la plantilla F-AGP-04 incluida en `assets/`. En ejecución local
-se conserva la antigua ruta de Drive únicamente como respaldo.
+toma automáticamente la nueva plantilla incluida en `assets/`. No requiere Drive
+ni cargar el formato o el logo en cada auditoría.
+
+La plantilla conserva su diseño de dos filas de encabezado corporativo y los
+encabezados de datos en la fila 3. Ya incluye `Flujo 2.0`; no se reconstruye desde
+otra hoja. Se conservan las fechas originales del coordinador y se agregan, al
+final de cada flujo, las fechas/horas exactas obtenidas de PMS. En Flujo 2.0 son
+tres hitos: llegada, ODM y dibujo. El código, versión y clasificación
+`BV_C2.2_Contractual` se mantienen y el recuadro se extiende hasta el nuevo borde
+derecho. `CONTROL ANS` se conserva como columna del formato, sin calcular un ANS.
+Se mantienen las listas desplegables de la plantilla, convirtiendo sus reglas
+extendidas de Excel al esquema estándar sin cambiar opciones ni rangos.
 
 ## Despliegue en Streamlit Community Cloud
 
 1. Publica este repositorio en GitHub. Es recomendable mantenerlo **privado**, pues
-   incluye la plantilla operativa F-AGP-04.
+   incluye la plantilla operativa y el logo corporativo.
 2. En Streamlit Community Cloud selecciona el repositorio, la rama `main` y
    `app.py` como archivo principal.
 3. No se requieren secretos. Las dependencias se instalan desde `requirements.txt`
@@ -203,9 +217,12 @@ locales están excluidos mediante `.gitignore` y no deben subirse al repositorio
 
 El instalador autónomo se genera en
 `release/RevisorBitacoras-Setup-1.0.1.exe`. Incluye Python, Streamlit, las
-dependencias y la plantilla F-AGP-04, por lo que el usuario final no debe instalar
+dependencias y la plantilla vigente al construir el instalador, por lo que el usuario final no debe instalar
 nada adicional. El manual para compartir con el usuario está en
 [`INSTALACION.md`](INSTALACION.md).
+
+La configuración de empaquetado incluye ahora la plantilla F-IND-ENEL-AGP-002 y
+su PNG. Los instaladores ya generados no cambian hasta reconstruirlos.
 
 Para reconstruir una nueva versión en el equipo de desarrollo:
 

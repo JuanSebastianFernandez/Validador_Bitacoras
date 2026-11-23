@@ -23,6 +23,7 @@ from bitacora import (
     SHEET_FLOW20,
     SHEET_NEW,
     SHEET_OLD,
+    TEMPLATE_CODE,
     STATUS_AUDIT_EXCLUDED,
     STATUS_MATCH,
     UPDATE_ORIGINS,
@@ -1364,7 +1365,7 @@ def audit_protocol_stage(context: dict[str, Any], export_file: Any) -> None:
         template_bytes = default_template_bytes()
         if template_bytes is None:
             raise BitacoraError(
-                "No encontré la plantilla fija F-AGP-04 incluida con la aplicación."
+                f"No encontré la plantilla fija {TEMPLATE_CODE} incluida con la aplicación."
             )
         context["final_output"] = build_upload_workbook(
             context["working_bytes"],
@@ -1390,7 +1391,7 @@ def audit_final_stage(context: dict[str, Any]) -> None:
     render_summary_panel(
         eyebrow="Etapa 4",
         title="Auditoría terminada",
-        subtitle="El Excel conserva la estructura codificada F-AGP-04 y agrega la trazabilidad de tus decisiones.",
+        subtitle=f"El Excel conserva la estructura codificada {TEMPLATE_CODE} y agrega la trazabilidad de tus decisiones.",
         cards=[
             ("Filas aprobadas", approved, "Incluidas en los flujos", "success"),
             ("Filas excluidas", excluded, "No pasan al cargue", "neutral"),
@@ -1510,7 +1511,7 @@ with st.sidebar:
         if st.button("Reiniciar con otros archivos", use_container_width=True):
             reset_audit()
             st.rerun()
-    st.caption("La plantilla HSEQ/SIG F-AGP-04 viene incluida automáticamente con la aplicación.")
+    st.caption(f"La plantilla HSEQ/SIG {TEMPLATE_CODE}, versión 1, viene incluida con la aplicación.")
 
 if start:
     try:

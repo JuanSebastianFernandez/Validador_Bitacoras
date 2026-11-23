@@ -10,7 +10,7 @@
 
 El **Revisor de Bitácoras** transforma la bitácora diaria entregada por el
 coordinador en una bitácora depurada, auditada y codificada con la plantilla
-**F-AGP-04**, lista para continuar con el cargue operativo en HSEQ/SIG.
+**F-IND-ENEL-AGP-002, versión 1 (Oct./26)**, lista para continuar con el cargue operativo en HSEQ/SIG.
 
 El sistema no se limita a convertir un Excel. Durante el proceso:
 
@@ -56,7 +56,7 @@ auditoría guiada.
 - Validación de cantidades en `Correo-Rotulacion` para solicitudes por correo
   finalizadas.
 - Traslado y limpieza de `Odm`, `Correo-Rotulacion` y `PNC`.
-- Generación del formato codificado F-AGP-04 con el logo de OCA Global.
+- Generación del formato codificado F-IND-ENEL-AGP-002 con el logo de Bureau Veritas.
 - Registro de decisiones e imágenes de soporte dentro del Excel final.
 
 ### 2.2 Funcionalidades que todavía no realiza
@@ -87,7 +87,7 @@ flowchart LR
     H --> I[Listado Excel para consultar en SAP]
     I --> J[EXPORT de SAP]
     J --> K[Etapa 3B/3C: cantidades PEL y TRATAS]
-    K --> L[Plantilla codificada F-AGP-04]
+    K --> L[Plantilla codificada F-IND-ENEL-AGP-002]
     L --> M[Excel final + trazabilidad]
 ```
 
@@ -215,18 +215,28 @@ cuentan los `GIS GUID` **únicos** clasificados como `P` y los `GIS GUID` único
 clasificados como `T`. Los registros sin protocolo, sin GUID o con otro tipo se
 ignoran.
 
-### 4.5 Plantilla F-AGP-04
+### 4.5 Plantilla F-IND-ENEL-AGP-002
 
 La plantilla está incluida dentro de la aplicación. El usuario no tiene que
-cargarla. La aplicación también conserva una ruta histórica de Drive como
-respaldo para ejecución local.
+cargarla. El PNG transparente de Bureau Veritas también viene incluido.
+No depende de una ruta de Drive ni del archivo original en Descargas.
 
 La plantilla aporta:
 
-- codificación F-AGP-04;
+- codificación F-IND-ENEL-AGP-002, versión 1 (Oct./26);
 - encabezados, colores, bordes y tablas oficiales;
 - estructura de las hojas operativas;
-- logo de OCA Global.
+- espacio para el logo de Bureau Veritas;
+- hoja propia de Flujo 2.0 y clasificación `BV_C2.2_Contractual`.
+
+Los datos comienzan debajo de la fila 3. Las primeras dos filas contienen el logo,
+el título y la codificación. La fecha de edición del formato no se reemplaza por
+la fecha de producción. Las fechas originales del coordinador se mantienen,
+separadas de las columnas de fecha/hora PMS que agrega el sistema.
+`CONTROL ANS` se conserva como columna del diseño, sin reintroducir las fórmulas
+de ANS del archivo de entrada ni calcular aquí ese indicador.
+Las listas desplegables de la plantilla se conservan con sus mismas referencias
+a `DATOS`; las reglas extendidas de Excel se trasladan a validaciones estándar.
 
 ## 5. Normalizaciones previas
 
@@ -1115,8 +1125,14 @@ Para filas no enriquecidas:
 
 Los registros se copian sobre las hojas codificadas de la plantilla. Se
 reconstruyen las tablas de Excel, se conservan estilos, se ajusta el encabezado
-para las nuevas columnas de tiempos y se inserta nuevamente el logo de OCA
-Global en `A1` de las hojas codificadas.
+para las nuevas columnas de tiempos y se inserta el logo transparente de Bureau
+Veritas, centrado en `A1:A2` y conservando su relación de aspecto. El PNG original
+no se recolorea ni se convierte a fondo blanco. Como respaldo, si falta el PNG,
+el sistema restaura el logo vectorial original del archivo de plantilla.
+
+Las hojas de auditoría y validación mantienen su formato técnico habitual; no se
+les agrega el encabezado corporativo. Las reglas de estados, ciclos, protocolos
+y cantidades no cambian por la migración de plantilla.
 
 El libro queda configurado para recalcular fórmulas al abrirse en Excel.
 
@@ -1323,7 +1339,8 @@ del servidor aún puede perder un expediente no descargado.
 |---|---|
 | `app.py` | Interfaz Streamlit, control de las cuatro etapas y sesión de auditoría |
 | `bitacora.py` | Reglas de negocio, lectura de archivos, ciclos, validaciones y generación de Excel |
-| `assets/` | Plantilla F-AGP-04 y recursos incluidos |
+| `assets/` | Plantilla F-IND-ENEL-AGP-002 y logo transparente incluidos |
+| `template_drawings.py` | Conservación de logos vectoriales y reglas extendidas de listas desplegables |
 | `tests/test_bitacora.py` | Pruebas automatizadas de estados, tiempos, protocolos, limpieza y salida |
 | `packaging/` | Construcción del ejecutable y del instalador de Windows |
 | `INSTALACION.md` | Instrucciones para instalar y usar la versión de escritorio |

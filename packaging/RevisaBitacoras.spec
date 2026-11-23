@@ -11,9 +11,10 @@ datas += [
     (str(ROOT / "app.py"), "."),
     (str(ROOT / ".streamlit" / "config.toml"), ".streamlit"),
     (
-        str(ROOT / "assets" / "F-AGP-04 Formato Bitacora Seguimiento Gestion.xlsx"),
+        str(ROOT / "assets" / "F-IND-ENEL-AGP-002_Ver_1_Bitácora seguimiento gestión.xlsx"),
         "assets",
     ),
+    (str(ROOT / "assets" / "bureau_veritas_logo.png"), "assets"),
 ]
 
 a = Analysis(
