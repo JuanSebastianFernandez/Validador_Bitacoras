@@ -847,7 +847,21 @@ def render_protocol_prevalidation(context: dict[str, Any], refs: list[dict[str, 
         )
     ]
     decisions = context.setdefault("protocol_decisions", {})
-    completed = sum(ref["key"] in decisions for ref in issues)
+    def valid_decision(ref: dict[str, Any]) -> bool:
+        decision = decisions.get(ref["key"], {})
+        if decision.get("current_protocol") != ref["protocol"]:
+            return False
+        if decision.get("action") == "no_apply":
+            return True
+        protocol = decision.get("protocol", "")
+        return (
+            decision.get("action") == "set"
+            and bool(split_protocols(protocol))
+            and not has_invalid_protocol_separator(protocol)
+            and not has_invalid_protocol_prefix(protocol)
+        )
+
+    completed = sum(valid_decision(ref) for ref in issues)
     if not issues:
         return True
 
@@ -901,35 +915,78 @@ def render_protocol_prevalidation(context: dict[str, Any], refs: list[dict[str, 
     st.progress(completed / len(issues), text=f"{completed} de {len(issues)} referencias revisadas")
     if completed == len(issues):
         if st.button("Aplicar protocolos y preparar listado", type="primary", use_container_width=True):
+            # Apply only the currently reviewed issues. Replaying every historic
+            # decision could overwrite protocols corrected later in stage 3C.
+            pending = {ref["key"]: decisions[ref["key"]] for ref in issues}
             workbook_bytes, validations, entries = apply_protocol_audit_decisions(
-                context["working_bytes"], context["working_validations"], decisions
+                context["working_bytes"], context["working_validations"], pending
             )
             context["working_bytes"] = workbook_bytes
             context["working_validations"] = validations
             context["audit_entries"].extend(entries)
+            context.setdefault("protocol_applied_decisions", {}).update(
+                {key: dict(decision) for key, decision in pending.items()}
+            )
             context["protocol_prevalidation_done"] = True
+            context["protocol_counts_need_refresh"] = True
+            context.pop("final_output", None)
             st.rerun()
     return False
 
 
+def refresh_protocol_quantities(
+    context: dict[str, Any], counts: dict[str, Any], protocols: list[str]
+) -> None:
+    """Reconcile the current inventory with an already loaded EXPORT."""
+    missing = sorted(protocol for protocol in protocols if protocol not in counts)
+    decisions = {
+        protocol: decision
+        for protocol, decision in context.get("missing_protocol_decisions", {}).items()
+        if protocol in missing
+    }
+    resolved_counts, no_apply = protocol_counts_with_audit_decisions(counts, decisions)
+    validations = apply_protocol_counts_to_validations(context["working_validations"], resolved_counts)
+    email_results = evaluate_email_quantities(context["working_bytes"], resolved_counts)
+    validations, email_results = apply_protocol_audit_results(
+        validations, email_results, context.get("protocol_decisions", {}), no_apply, resolved_counts,
+    )
+    context["protocol_counts"] = counts
+    context["resolved_protocol_counts"] = resolved_counts
+    context["working_validations"] = validations
+    context["email_quantity_results"] = email_results
+    context["missing_protocols"] = missing
+    context["missing_protocol_decisions"] = decisions
+    context["protocols_no_apply"] = no_apply
+    context.pop("protocol_counts_need_refresh", None)
+    context.pop("final_output", None)
+
+
 def audit_protocol_stage(context: dict[str, Any], export_file: Any) -> None:
     refs = protocol_references(context["working_bytes"], context["working_validations"])
-    if not context.get("protocol_prevalidation_done"):
-        ready = render_protocol_prevalidation(context, refs)
-        if not ready:
-            return
-        context["protocol_prevalidation_done"] = True
-        refs = protocol_references(context["working_bytes"], context["working_validations"])
-
+    # Bootstrap sessions opened with the previous app version, then distinguish
+    # applied No aplica decisions from choices still awaiting the 3A Apply button.
+    applied = context.setdefault(
+        "protocol_applied_decisions",
+        {key: dict(decision) for key, decision in context.get("protocol_decisions", {}).items()}
+        if context.get("protocol_prevalidation_done") else {},
+    )
     no_apply_reference_keys = {
         key
-        for key, decision in context.get("protocol_decisions", {}).items()
+        for key, decision in applied.items()
         if decision.get("action") == "no_apply"
     }
     refs = [ref for ref in refs if ref["key"] not in no_apply_reference_keys]
+    # Always verify current values before 3B, even if a previous inventory was
+    # approved. Validation and inventory export must use the same current input.
+    context["protocol_prevalidation_done"] = False
+    if not render_protocol_prevalidation(context, refs):
+        return
+    context["protocol_prevalidation_done"] = True
 
     inventory = protocol_inventory_frame(refs)
     protocols = sorted(set(inventory["Protocolo"].tolist())) if not inventory.empty else []
+    if context.get("protocol_counts_need_refresh") and "protocol_counts" in context:
+        refresh_protocol_quantities(context, context["protocol_counts"], protocols)
     missing_decisions = context.get("missing_protocol_decisions", {})
     unresolved_count = len(
         [
@@ -973,40 +1030,8 @@ def audit_protocol_stage(context: dict[str, Any], export_file: Any) -> None:
             st.success(f"EXPORT procesado: {export_file.name}")
         else:
             counts = read_export_protocol_counts(export_bytes)
-            missing = sorted(protocol for protocol in protocols if protocol not in counts)
-            decisions = {
-                protocol: decision
-                for protocol, decision in context.get("missing_protocol_decisions", {}).items()
-                if protocol in missing
-            }
-            resolved_counts, no_apply = protocol_counts_with_audit_decisions(
-                counts,
-                decisions,
-            )
-            validations = apply_protocol_counts_to_validations(
-                context["working_validations"],
-                resolved_counts,
-            )
-            email_results = evaluate_email_quantities(
-                context["working_bytes"],
-                resolved_counts,
-            )
-            validations, email_results = apply_protocol_audit_results(
-                validations,
-                email_results,
-                context.get("protocol_decisions", {}),
-                no_apply,
-                resolved_counts,
-            )
-            context["protocol_counts"] = counts
-            context["resolved_protocol_counts"] = resolved_counts
-            context["working_validations"] = validations
-            context["email_quantity_results"] = email_results
-            context["missing_protocols"] = missing
-            context["missing_protocol_decisions"] = decisions
-            context["protocols_no_apply"] = no_apply
+            refresh_protocol_quantities(context, counts, protocols)
             context["processed_export_id"] = export_id
-            context.pop("final_output", None)
             st.rerun()
 
     if "protocol_counts" not in context:

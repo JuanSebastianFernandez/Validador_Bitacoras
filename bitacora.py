@@ -663,20 +663,21 @@ def split_protocols(value: Any) -> list[str]:
 
 
 def has_invalid_protocol_separator(value: Any) -> bool:
-    """Detect multiple numeric protocols that were not separated with semicolons."""
+    """Validate every semicolon segment, not just the complete cell.
+
+    One valid semicolon cannot hide a malformed segment such as
+    '1000168365-1000168367;1000168368-1000168369'. Never expand ranges or
+    guess the intended protocols: the auditor must provide the explicit list.
+    """
     text = normalize_identifier(value)
     if not text:
         return False
     if re.search(r"[,|\r\n]", text):
         return True
-    numeric_protocols = list(
-        dict.fromkeys(re.findall(r"(?<!\d)\d{7,}(?!\d)", text))
-    )
-    concatenated_numeric = any(
-        len(match) > 12 for match in re.findall(r"(?<!\d)\d+(?!\d)", text)
-    )
-    return concatenated_numeric or (
-        len(numeric_protocols) > 1 and ";" not in text
+    return any(
+        len(re.findall(r"(?<!\d)\d{7,}(?!\d)", segment)) > 1
+        or any(len(number) > 12 for number in re.findall(r"(?<!\d)\d+(?!\d)", segment))
+        for segment in text.split(";")
     )
 
 

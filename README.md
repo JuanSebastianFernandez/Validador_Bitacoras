@@ -43,6 +43,12 @@ antes de avanzar:
    revisa en una tarjeta copiable y permite: corregir el código en todas sus
    referencias, registrar cantidades PEL/TRATA manuales con justificación e imagen
    obligatoria, o marcarlo como `No aplica` con justificación.
+   La prevalidación se comprueba sobre los valores actuales en cada ejecución,
+   aunque la sesión ya hubiera terminado 3A. Un `;` no valida los otros grupos:
+   `1000168365-1000168367;1000168368` vuelve a 3A. No se expanden rangos ni se
+   adivinan identificadores. Solo se aplican las decisiones pendientes, sin
+   sobrescribir correcciones anteriores; si ya había un EXPORT, se recalculan
+   los faltantes y las cantidades con el listado corregido sin volver a cargarlo.
 4. **Excel final:** entrega la bitácora codificada lista para cargar y agrega la hoja
    `Auditoria guiada`, donde queda registrada cada decisión, estado, AGP, protocolo
    y justificación. Cuando hubo soportes manuales agrega además `Soportes protocolos`,

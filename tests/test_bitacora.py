@@ -869,6 +869,31 @@ def test_protocol_separator_rejects_alternatives_and_concatenated_codes():
     assert not has_invalid_protocol_separator("1000162837;1000162838")
 
 
+@pytest.mark.parametrize("value", [
+    "1000168365-1000168367;1000168368-1000168369",
+    "1000168365;1000168368-1000168369",
+    "1000168365-1000168367;1000168368",
+    "1000168365 / 1000168367;1000168368",
+    "1000168365 1000168367;1000168368",
+    "1000168365;1000168365-1000168365",  # Repeated IDs still require ;.
+    "10001683651000168367;1000168368",
+])
+def test_a_semicolon_does_not_hide_an_invalid_protocol_segment(value):
+    from bitacora import has_invalid_protocol_separator
+    assert has_invalid_protocol_separator(value)
+
+
+def test_valid_protocol_segments_are_consistent_with_inventory_validation():
+    from bitacora import has_invalid_protocol_separator, split_protocols
+    value = "1000168365; 1000168367 ;1000169366;1000169379"
+    assert not has_invalid_protocol_separator(value)
+    assert all(not has_invalid_protocol_separator(token) for token in split_protocols(value))
+    output = build_protocol_inventory_workbook([{"Protocolo": token} for token in split_protocols(value)])
+    wb = load_workbook(BytesIO(output))
+    assert wb["Protocolos"].max_row == 5
+    wb.close()
+
+
 def test_protocols_must_begin_with_1000_in_every_token():
     assert has_invalid_protocol_prefix("9990162837")
     assert has_invalid_protocol_prefix("1000162837;2000162838")

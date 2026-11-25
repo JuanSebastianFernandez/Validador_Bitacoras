@@ -921,6 +921,20 @@ Antes de generar el listado para SAP, la aplicación detecta referencias con:
 Cada referencia se corrige en la misma interfaz o se justifica como `No aplica`.
 No se puede avanzar mientras quede una referencia pendiente.
 
+La revisión se hace con los valores actuales en cada ejecución de la etapa 3,
+no solo al ingresar por primera vez. Si la sesión ya había cerrado 3A pero sus
+datos contienen un protocolo inválido, se vuelve a mostrar 3A antes de intentar
+construir el Excel de SAP. Cada segmento entre `;` se valida por separado:
+`1000168365-1000168367;1000168368` sigue siendo inválido. No se interpretan guiones
+como rangos ni se generan números intermedios automáticamente.
+
+Una decisión antigua que conserve un separador inválido no cuenta como revisada.
+Al aplicar se escriben solo las referencias pendientes de esa revisión, sin
+repetir decisiones históricas ni sobrescribir correcciones posteriores de 3C.
+Los `No aplica` ya aplicados conservan su trazabilidad y no se vuelven a preguntar.
+Si había un EXPORT cargado, se reutiliza para actualizar faltantes y cantidades
+después de corregir los protocolos.
+
 ### 16.3 Reglas para varios protocolos
 
 Los protocolos deben escribirse así:
